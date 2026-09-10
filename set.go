@@ -4,6 +4,7 @@ import (
 	"iter"
 	"maps"
 	"math/bits"
+	"slices"
 )
 
 // Set es un conjunto de elementos comparables sin orden. La memoria del
@@ -51,8 +52,16 @@ func (s *Set[T]) Add(e ...T) {
 	if s.set == nil {
 		s.set = make(map[T]struct{}, len(e))
 	}
-	for _, value := range e {
-		s.set[value] = struct{}{}
+	totalLen := s.Len() + len(e)
+	makeNew := 2*theoreticalSlots(s.Len()) < theoreticalSlots(totalLen)
+	if makeNew {
+		newSet := New[T](totalLen)
+		maps.Copy(newSet.set, s.set)
+		s.set = newSet.set
+	}
+	s.AddSeq(slices.Values(e))
+	if makeNew && hintOversized(s.Len(), totalLen) {
+		s.Rehash()
 	}
 }
 
@@ -72,24 +81,17 @@ func (s *Set[T]) Extend(sets ...*Set[T]) {
 		extLen += set.Len()
 	}
 	totalLen := s.Len() + extLen
-	if theoreticalSlots(totalLen) > theoreticalSlots(s.Len()) {
-		// El resultado no cabe en el escalón actual: construir de una
-		// vez con capacidad para el caso sin solape.
+	makeNew := 2*theoreticalSlots(s.Len()) < theoreticalSlots(totalLen)
+	if makeNew {
 		newSet := New[T](totalLen)
 		maps.Copy(newSet.set, s.set)
-		for _, set := range sets {
-			maps.Copy(newSet.set, set.set)
-		}
 		s.set = newSet.set
-		// Con solape, len puede haber quedado por debajo del escalón
-		// reservado: compactar.
-		if hintOversized(totalLen, s.Len()) {
-			s.Rehash()
-		}
-		return
 	}
 	for _, set := range sets {
 		maps.Copy(s.set, set.set)
+	}
+	if makeNew && hintOversized(s.Len(), totalLen) {
+		s.Rehash()
 	}
 }
 
@@ -118,7 +120,7 @@ func (s *Set[T]) Difference(set *Set[T]) *Set[T] {
 				res.set[value] = struct{}{}
 			}
 		}
-		if hintOversized(s.Len(), res.Len()) {
+		if hintOversized(res.Len(), s.Len()) {
 			res.Rehash()
 		}
 		return res
@@ -252,7 +254,7 @@ func Intersection[T comparable](sets ...*Set[T]) *Set[T] {
 	// Recorrer el más pequeño y comprobar pertenencia en los demás:
 	// menos consultas que al revés.
 	newSet := New[T](minSet.Len())
-	for value := range minSet.set {
+	for value := range minSet.IterAll() {
 		inAll := true
 		for _, set := range sets {
 			if set == minSet {
