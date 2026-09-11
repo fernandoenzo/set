@@ -15,13 +15,22 @@ import (
 // El valor cero (var s Set[T]) es utilizable: el mapa se crea con el
 // primer Add.
 type Set[T comparable] struct {
-	set map[T]struct{}
+	set      map[T]struct{}
+	capacity int
 }
 
 func New[T comparable](capacity int) *Set[T] {
+	capacity = max(capacity, 0)
 	return &Set[T]{
-		set: make(map[T]struct{}, max(capacity, 0)),
+		set:      make(map[T]struct{}, capacity),
+		capacity: capacity,
 	}
+}
+
+func (s *Set[T]) estimatedSlotsLeft() int {
+	setLen := s.Len()
+	maxLenCap := max(setLen, s.capacity)
+	return theoreticalSlots(maxLenCap) - setLen
 }
 
 // NewFromSlices crea un set con los elementos distintos de todos los
@@ -52,15 +61,20 @@ func (s *Set[T]) Add(e ...T) {
 	if s.set == nil {
 		s.set = make(map[T]struct{}, len(e))
 	}
-	totalLen := s.Len() + len(e)
-	makeNew := 2*theoreticalSlots(s.Len()) < theoreticalSlots(totalLen)
+	makeNew := false
+	var totalLen int
+	if estimatedSlots := s.estimatedSlotsLeft(); estimatedSlots < len(e) {
+		totalLen = s.Len() + len(e)
+		makeNew = 2*(estimatedSlots+s.Len()) < theoreticalSlots(totalLen)
+	}
 	if makeNew {
 		newSet := New[T](totalLen)
 		maps.Copy(newSet.set, s.set)
 		s.set = newSet.set
+		s.capacity = newSet.capacity
 	}
 	s.AddSeq(slices.Values(e))
-	if makeNew && hintOversized(s.Len(), totalLen) {
+	if makeNew && hintOversized(totalLen, s.Len()) {
 		s.Rehash()
 	}
 }
@@ -80,17 +94,23 @@ func (s *Set[T]) Extend(sets ...*Set[T]) {
 	for _, set := range sets {
 		extLen += set.Len()
 	}
-	totalLen := s.Len() + extLen
-	makeNew := 2*theoreticalSlots(s.Len()) < theoreticalSlots(totalLen)
+	makeNew := false
+	var totalLen int
+	if estimatedSlotsLeft := s.estimatedSlotsLeft(); estimatedSlotsLeft < extLen {
+		totalLen = s.Len() + extLen
+		makeNew = 2*(estimatedSlotsLeft+s.Len()) < theoreticalSlots(totalLen)
+	}
 	if makeNew {
 		newSet := New[T](totalLen)
 		maps.Copy(newSet.set, s.set)
 		s.set = newSet.set
+		s.capacity = newSet.capacity
+
 	}
 	for _, set := range sets {
 		maps.Copy(s.set, set.set)
 	}
-	if makeNew && hintOversized(s.Len(), totalLen) {
+	if makeNew && hintOversized(totalLen, s.Len()) {
 		s.Rehash()
 	}
 }
@@ -120,12 +140,12 @@ func (s *Set[T]) Difference(set *Set[T]) *Set[T] {
 				res.set[value] = struct{}{}
 			}
 		}
-		if hintOversized(res.Len(), s.Len()) {
+		if hintOversized(s.Len(), res.Len()) {
 			res.Rehash()
 		}
 		return res
 	}
-	res := s.Clone()
+	res := s.Copy()
 	res.Subtract(set)
 	return res
 }
@@ -167,19 +187,27 @@ func (s *Set[T]) Rehash() {
 	cloned := New[T](s.Len())
 	maps.Copy(cloned.set, s.set)
 	s.set = cloned.set
+	s.capacity = cloned.capacity
 }
 
 // Clone devuelve una copia independiente y compacta: capacidad exacta
 // para su longitud, sin heredar el exceso del original. A diferencia de
 // maps.Clone, nunca devuelve un mapa a nil.
 func (s *Set[T]) Clone() *Set[T] {
+	newSet := New[T](0)
+	newSet.set = maps.Clone(s.set)
+	newSet.capacity = s.capacity
+	return newSet
+}
+
+func (s *Set[T]) Copy() *Set[T] {
 	newSet := New[T](s.Len())
 	maps.Copy(newSet.set, s.set)
 	return newSet
 }
 
-func (s *Set[T]) Contains(e T) (res bool) {
-	_, res = s.set[e]
+func (s *Set[T]) Contains(e T) bool {
+	_, res := s.set[e]
 	return res
 }
 
@@ -240,7 +268,7 @@ func Intersection[T comparable](sets ...*Set[T]) *Set[T] {
 		return New[T](0)
 	}
 	if len(sets) == 1 {
-		return sets[0].Clone()
+		return sets[0].Copy()
 	}
 	minSet := sets[0]
 	for _, set := range sets[1:] {
