@@ -20,7 +20,7 @@ type Set[T comparable] struct {
 }
 
 func New[T comparable](capacity int) *Set[T] {
-	capacity = max(capacity, 0)
+	capacity = max(1, capacity)
 	return &Set[T]{
 		set:      make(map[T]struct{}, capacity),
 		capacity: capacity,
@@ -59,7 +59,9 @@ func (s *Set[T]) Len() int {
 
 func (s *Set[T]) Add(e ...T) {
 	if s.set == nil {
-		s.set = make(map[T]struct{}, len(e))
+		tempSet := New[T](len(e))
+		s.set = tempSet.set
+		s.capacity = tempSet.capacity
 	}
 	makeNew := false
 	var totalLen int
@@ -81,7 +83,9 @@ func (s *Set[T]) Add(e ...T) {
 
 func (s *Set[T]) AddSeq(it iter.Seq[T]) {
 	if s.set == nil {
-		s.set = make(map[T]struct{})
+		tempSet := New[T](0)
+		s.set = tempSet.set
+		s.capacity = tempSet.capacity
 	}
 	for value := range it {
 		s.set[value] = struct{}{}
@@ -126,7 +130,9 @@ func (s *Set[T]) Intersects(sets ...*Set[T]) {
 	allSets := make([]*Set[T], 0, len(sets)+1)
 	allSets = append(allSets, sets...)
 	allSets = append(allSets, s)
-	s.set = Intersection(allSets...).set
+	newSet := Intersection(allSets...)
+	s.set = newSet.set
+	s.capacity = newSet.capacity
 }
 
 // Difference devuelve s − set.
@@ -310,9 +316,6 @@ func Intersection[T comparable](sets ...*Set[T]) *Set[T] {
 // El redondeo puede dejar el presupuesto (7/8 de los slots) por debajo de
 // hint: son los "cracks" que needsRehash detecta.
 func theoreticalSlots(hint int) int {
-	if hint <= 0 {
-		return 0
-	}
 	if hint <= 8 {
 		return 8 // small map: un grupo tras la primera inserción
 	}
