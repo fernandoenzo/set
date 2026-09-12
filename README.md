@@ -55,11 +55,69 @@ for every hint up to 300,000.
   so each capacity step is rebuilt at most once per monotone descent.
 - **Rebuilds are rare.** Rebuilding only happens when the element count crosses
   a step boundary or falls below 80% of a multi-table step's slots.
-- **No background work, no goroutines, no finalizers, no `unsafe`.** One field of
-  two words plus a map header; no external dependencies.
+- **No background work, no goroutines, no finalizers, no `unsafe`.** The type is
+  a map header plus an `int`; no external dependencies.
+
+### Concurrency
 
 The set is **not** safe for concurrent use without external synchronisation, the
-same as a Go map.
+same as a Go map. That is a deliberate design decision, not an omission.
+
+An internal lock cannot be added without breaking the API and the performance
+guarantees, for three measured reasons:
+
+- **It would deadlock on self-operations.** `s.Extend(s)` and `s.Intersects(s)`
+  re-enter the receiver while it is locked. A non-recursive mutex blocks and a
+  recursive one hides the aliasing instead of fixing it.
+- **It would have to copy the lock.** `resize` replaces the receiver wholesale
+  (`*s = *rebuilt`), which copies the struct. With a mutex inside, `go vet`
+  rejects it: `assignment copies lock value`.
+- **It would serialise reads and collapse parallel scaling.** Reads are lock-free
+  today and parallelise for free. Measured with 32 goroutines reading from a
+  1000-element set:
+
+  | Mechanism | Single-threaded | 32 goroutines |
+  |---|---|---|
+  | lock-free (this package) | 3.5 ns | **0.26 ns** |
+  | caller-held `sync.RWMutex` | 10.4 ns | 38 ns |
+  | internal `sync.Mutex` | 10.7 ns | 150–246 ns |
+  | `chan struct{}` of capacity 1 | 23.8 ns | 119–147 ns |
+  | `atomic.Pointer` to an immutable snapshot | 3.6 ns | 0.27 ns |
+
+  A channel used as a semaphore is strictly worse than a mutex — 7× slower
+  uncontended, no better under contention — because a capacity-1 channel is a
+  mutex with more machinery. An internal lock also serialises readers, which is
+  exactly the workload sets face most often.
+
+A lock inside the type would also make every caller pay for concurrency they may
+not need, and still could not make a read-then-write sequence atomic: `Contains`
+followed by `Add` would remain a race, because the critical section has to span
+both calls.
+
+**Use a lock held by the caller instead**, which knows the access pattern:
+
+```go
+type SharedSet struct {
+	mu sync.RWMutex
+	s  *set.Set[int]
+}
+
+func (x *SharedSet) Contains(v int) bool {
+	x.mu.RLock()
+	defer x.mu.RUnlock()
+	return x.s.Contains(v)
+}
+```
+
+Readers then run in parallel, writers are serialised, and callers that do not
+share the set pay nothing.
+
+If you need lock-free concurrent reads at scale, the shape that works is an
+immutable snapshot behind an `atomic.Pointer`, rebuilt copy-on-write for
+writes — the last row of the table above. It keeps reads as fast as the
+lock-free case, but writes become `O(n)` and reads observe a snapshot rather
+than the latest element. That is a different contract and belongs in a separate
+wrapper, not in this type.
 
 ## API
 
