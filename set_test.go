@@ -388,6 +388,120 @@ func TestNewFromSlicesDistinct(t *testing.T) {
 	assertMatches(t, NewFromSlices([]int{}), modelOf())
 }
 
+// Difference is documented to deliver a result that is never over-allocated:
+// its reservation must match the step of its final length, with no room for a
+// second rebuild. Subtracting a strict subset that drops the result one step
+// is the case that used to need one.
+func TestDifferenceNeverOverAllocated(t *testing.T) {
+	cases := [][2]int{
+		{1000, 0}, {1000, 1}, {1000, 499}, {1000, 500}, {1000, 501},
+		{1000, 900}, {1000, 999}, {1000, 1000},
+		{10000, 1000}, {10000, 5000}, {10000, 9000}, {10000, 10000},
+		{100000, 50000}, {100000, 90000},
+	}
+	for _, c := range cases {
+		s, other := New[int](0), New[int](0)
+		s.Add(makeSeq(c[0])...)
+		other.Add(makeSeq(c[1])...)
+
+		res := s.Difference(other)
+		if got, want := res.Len(), c[0]-c[1]; got != want {
+			t.Fatalf("m=%d n=%d: Len() = %d, want %d", c[0], c[1], got, want)
+		}
+		// The delivered reservation must sit in the step of the result's own
+		// length: anything above that would be memory the caller never uses and
+		// a rebuild waiting to happen.
+		if res.capacity < res.Len() {
+			t.Fatalf("m=%d n=%d: capacity = %d < Len = %d", c[0], c[1], res.capacity, res.Len())
+		}
+		if hintOversized(res.capacity, res.Len()) {
+			t.Fatalf("m=%d n=%d: capacity = %d reserves above the step for Len = %d",
+				c[0], c[1], res.capacity, res.Len())
+		}
+		assertMatches(t, res, modelOf(seqFrom(c[1], c[0])...))
+	}
+}
+
+// Subtracting a disjoint set leaves the source intact: this is the branch that
+// skips the counting pass, so the result must still be correct and keep the
+// source's step rather than shrinking it.
+func TestDifferenceDisjointKeepsStep(t *testing.T) {
+	s := New[int](0)
+	s.Add(makeSeq(10000)...)
+	other := NewFromSlices(disjointSeq(1000))
+
+	res := s.Difference(other)
+	if res.Len() != 10000 {
+		t.Fatalf("Len() = %d, want 10000", res.Len())
+	}
+	assertMatches(t, res, modelOf(makeSeq(10000)...))
+}
+
+func disjointSeq(n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = i + 1_000_000
+	}
+	return out
+}
+
+// seqFrom returns lo, lo+1, ..., hi-1.
+func seqFrom(lo, hi int) []int {
+	out := make([]int, max(0, hi-lo))
+	for i := range out {
+		out[i] = lo + i
+	}
+	return out
+}
+
+// Difference must not mutate its operands.
+func TestDifferenceLeavesOperandsIntact(t *testing.T) {
+	s, other := NewFromSlices(makeSeq(500)), NewFromSlices(makeSeq(200))
+	beforeS, beforeOther := s.Len(), other.Len()
+
+	res := s.Difference(other)
+
+	if res.Len() != 300 {
+		t.Fatalf("Len() = %d, want 300", res.Len())
+	}
+	if s.Len() != beforeS || other.Len() != beforeOther {
+		t.Fatalf("operands mutated: s=%d other=%d", s.Len(), other.Len())
+	}
+	assertMatches(t, s, modelOf(makeSeq(500)...))
+	assertMatches(t, other, modelOf(makeSeq(200)...))
+}
+
+func TestIntersects(t *testing.T) {
+	s := setOf(1, 2, 3, 4, 5)
+	s.Intersects(setOf(2, 3, 4), setOf(3, 4, 9))
+	assertMatches(t, s, modelOf(3, 4))
+
+	s = setOf(1, 2, 3)
+	s.Intersects()
+	assertMatches(t, s, modelOf(1, 2, 3))
+
+	s = setOf(1, 2, 3)
+	s.Intersects(setOf())
+	assertMatches(t, s, modelOf())
+}
+
+func TestGetAllAndIterAllAgree(t *testing.T) {
+	s := setOf(5, 3, 1, 4, 2)
+	got := s.GetAll()
+	if len(got) != 5 {
+		t.Fatalf("GetAll() = %v", got)
+	}
+	seen := make(map[int]bool, 5)
+	for v := range s.IterAll() {
+		seen[v] = true
+	}
+	for _, v := range got {
+		if !seen[v] {
+			t.Fatalf("GetAll returned %d which IterAll did not", v)
+		}
+	}
+}
+
 // --- copy semantics --------------------------------------------------------
 
 // Copy is documented as compact: room for exactly its length. Clone is
