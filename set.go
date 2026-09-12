@@ -39,8 +39,7 @@ func New[T comparable](capacity int) *Set[T] {
 func (s *Set[T]) resize(capacity int) {
 	rebuilt := New[T](capacity)
 	maps.Copy(rebuilt.set, s.set)
-	s.set = rebuilt.set
-	s.capacity = rebuilt.capacity
+	*s = *rebuilt
 }
 
 // ensure creates the internal map on the first write, reserving room for hint
@@ -148,8 +147,7 @@ func (s *Set[T]) Intersects(sets ...*Set[T]) {
 	allSets = append(allSets, sets...)
 	allSets = append(allSets, s)
 	newSet := Intersection(allSets...)
-	s.set = newSet.set
-	s.capacity = newSet.capacity
+	*s = *newSet
 }
 
 // Difference returns s − set.
