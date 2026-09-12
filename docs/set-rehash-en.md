@@ -1,6 +1,6 @@
 # `Set` memory compaction — full deduction with proofs
 
-**Component:** `internal/utils/set2.go` (`utils` package).
+**Component:** `github.com/fernandoenzo/set`, file `set.go` (`set` package).
 **Audience:** any reader with probability at the level of the binomial random variable. No knowledge of Go and no prior experiments are assumed. Every number used to support a theorem is computed here step by step.
 
 **Document map.** §1 states the problem and fixes the vocabulary. §2 describes precisely what the code does. §3 deduces (with no experiment) that the rule *has* to be a threshold crossing. §§4–7 prove the **Excess Theorem**: if the set is rebuilt when its element count is at or below $80\%$ of a capacity step, the expected extra memory after the rebuild is strictly below $0.4\%$ of that capacity. §§8–§10 prove separately the three engineering lemmas (`make` quantization, termination, why `maps.Clone` cannot work). The appendices collect the numerical checks and their comparison against measurements.
@@ -50,7 +50,7 @@ The $0.4\%$ of the title is the bound we will prove for $\mathbb{E}[\mathcal{E}]
 
 ## 2. What the code does precisely
 
-The file `set2.go` contains three helper functions and all the logic lives in the trigger rules. We summarise them precisely, because the theorems are about them.
+The file `set.go` contains the reservation model (`theoreticalSlots`), two trigger rules (`needsRehash`, `hintOversized`) and the capacity accounting that decides when to reserve (`estimatedSlotsLeft`). We summarise them precisely, because the theorems are about them.
 
 ### 2.1. `theoreticalSlots(hint)` — the reservation model
 
@@ -94,7 +94,7 @@ The last two lines are the heart of the design and read identically: **fire only
 hintOversized(hint, actual)  ⟺  T(hint) ≠ T(actual)
 ```
 
-Used only when building a new `Set` (`NewFromSlices`, `Difference`, `Intersection`, `Union`/`Extend`): if space was reserved for `hint` elements but far fewer remain, a whole memory step was crossed downward and the map is compacted. A freshly built map at load $\le 7/8$ is already at its natural size; reasoning further would just re-roll the same dice at the same cost with no expected gain.
+Used only when building a new `Set` (`NewFromSlices`, `Add`, `Extend`, `Difference`, `Intersection`): if space was reserved for `hint` elements but far fewer remain, a whole memory step was crossed downward and the map is compacted. A freshly built map at load $\le 7/8$ is already at its natural size; reasoning further would just re-roll the same dice at the same cost with no expected gain.
 
 ---
 
@@ -327,7 +327,7 @@ All cases fall below $4/5$: the theorem applies with room to spare.
 
 **Proof.** `maps.Clone(m)` invokes the runtime's internal `Clone`, which copies the table structure as-is: same number of tables, same `growthLeft`, same tombstones. By definition, it preserves the original's slots, including any excess. In contrast, `maps.Copy(dst, src)` performs one insertion per key into `dst`, which was created with `make(map, len)`: the runtime sizes `dst` for the exact number of keys to copy, and the original's tombstones do not exist in the new map. $\blacksquare$
 
-Additionally, `maps.Clone(nil)` returns `nil`, which would break the contract "the zero value of `Set` is usable". For both reasons the code comment states it: the choice is not aesthetic, it is the only one that satisfies the compaction specification.
+The distinction is not stylistic: `Rehash` and `Copy` need `maps.Copy` in order to compact, and `Clone` deliberately uses `maps.Clone` because its contract is the opposite one, preserving the source's reserved capacity. Also, `maps.Clone(nil)` returns `nil`, which rules `Clone` out of any path that must produce a usable map (the code comment says so at `Rehash`).
 
 ---
 
@@ -359,7 +359,7 @@ Bringing the three theorems and the lemmas together:
 | A single rebuild per step | loop impossible | Termination Theorem (§9) |
 | `maps.Copy`, not `maps.Clone` | only `Copy` compacts | Lemma 5 (§8) |
 
-Everything `set2.go` does is in the table; nothing it does lacks an entry in it.
+Everything `set.go` does is in the table; nothing it does lacks an entry in it.
 
 ---
 
