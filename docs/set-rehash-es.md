@@ -1,6 +1,6 @@
 # La compactación de memoria de `Set` — deducción completa con demostraciones
 
-**Componente:** `internal/utils/set2.go` (paquete `utils`).
+**Componente:** `github.com/fernandoenzo/set`, fichero `set.go` (paquete `set`).
 **Audiencia:** cualquier lector que sepa probabilidad a nivel de variable aleatoria binomial. No se asume conocimiento de Go ni de experimentos previos. Todo número que sirva de apoyo a un teorema se calcula aquí paso a paso.
 
 **Mapa del documento.** El §1 fija el problema y el vocabulario. El §2 describe qué hace exactamente el código. El §3 deduce (sin usar ningún experimento) que la regla *tiene* que ser un cruce de umbral. Los §4–§7 demuestran el **Teorema del Exceso**: si el conjunto se reconstruye cuando su número de elementos está a lo sumo en el $80\%$ de la capacidad de un escalón, la memoria extra esperada tras la reconstrucción es estrictamente menor que el $0{,}4\%$ de esa capacidad. Los §8–§10 demuestran por separado los tres lemas de ingeniería (cuantización de `make`, terminación, incompatibilidad de `maps.Clone`). Los anexos recogen las comprobaciones numéricas y su contraste con las mediciones.
@@ -50,7 +50,7 @@ El número $0{,}4\%$ del título es la cota que vamos a demostrar para $\mathbb{
 
 ## 2. Qué hace exactamente el código
 
-El fichero `set2.go` contiene tres funciones de apoyo y toda la lógica está en las reglas de disparo. Las resumimos con precisión, porque los teoremas van sobre ellas.
+El fichero `set.go` contiene el modelo de reserva (`theoreticalSlots`), dos reglas de disparo (`needsRehash`, `hintOversized`) y la contabilidad de capacidad que decide cuándo se reserva (`estimatedSlotsLeft`). Las resumimos con precisión, porque los teoremas van sobre ellas.
 
 ### 2.1. `theoreticalSlots(hint)` — el modelo de reserva
 
@@ -94,7 +94,7 @@ Las dos últimas líneas son el corazón del diseño y se leen igual: **dispara 
 hintOversized(hint, actual)  ⟺  T(hint) ≠ T(actual)
 ```
 
-Solo se usa al construir un `Set` nuevo (`NewFromSlices`, `Difference`, `Intersection`, `Union`/`Extend`): si se reservó para `hint` elementos pero quedaron bastantes menos, cruzó un escalón entero de memoria y se compacta. Un mapa recién creado con carga $\le 7/8$ ya está en su tamaño natural; razonarlo más sería volver a tirar los mismos dados con el mismo coste y sin esperanza de mejora.
+Solo se usa al construir un `Set` nuevo (`NewFromSlices`, `Add`, `Extend`, `Difference`, `Intersection`): si se reservó para `hint` elementos pero quedaron bastantes menos, cruzó un escalón entero de memoria y se compacta. Un mapa recién creado con carga $\le 7/8$ ya está en su tamaño natural; razonarlo más sería volver a tirar los mismos dados con el mismo coste y sin esperanza de mejora.
 
 ---
 
@@ -327,7 +327,7 @@ En todos los casos queda por debajo de $4/5$: el teorema se aplica con holgura.
 
 **Demostración.** `maps.Clone(m)` invoca el `Clone` interno del runtime, que copia la estructura de tablas tal cual: mismo número de tablas, mismo `growthLeft`, mismas tombstones. Por definición, conserva los slots del original, incluido cualquier exceso. En cambio, `maps.Copy(dst, src)` llama una a una a las inserciones de cada clave en `dst`, que ha sido creado con `make(map, len)`: el runtime dimensiona `dst` para el número exacto de claves a copiar, y las tombstones del original no existen en el nuevo. $\blacksquare$
 
-Además `maps.Clone(nil)` devuelve `nil`, lo que rompería el contrato «el valor cero de `Set` es utilizable». Por ambas razones el comentario del código lo deja dicho: la elección no es estética, es la única que cumple la especificación de compactación.
+La distinción no es de estilo: `Rehash` y `Copy` la necesitan para compactar, y `Clone` usa deliberadamente `maps.Clone` porque su contrato es justo el contrario, conservar la capacidad reservada del original. Además `maps.Clone(nil)` devuelve `nil`, lo que descarta a `Clone` para cualquier ruta que deba producir un mapa utilizable (el comentario del código lo deja dicho en `Rehash`).
 
 ---
 
@@ -359,7 +359,7 @@ Ponemos juntos los tres teoremas y los lemas:
 | Una sola reconstrucción por escalón | imposible entrar en bucle | Teorema de terminación (§9) |
 | `maps.Copy`, no `maps.Clone` | solo `Copy` compacta | Lema 5 (§8) |
 
-Todo lo que `set2.go` hace está en la tabla; nada de lo que hace carece de entrada en ella.
+Todo lo que `set.go` hace está en la tabla; nada de lo que hace carece de entrada en ella.
 
 ---
 
