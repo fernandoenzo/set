@@ -52,9 +52,12 @@ for every hint up to 300,000.
 - **Memory tracks length.** Deletions cannot leave the set holding memory for a
   peak it no longer has, beyond the proven 0.4% bound.
 - **Results are sized exactly.** Operations that return a new set
-  (`Difference`, `Intersection`, `Copy`) deliver a map whose reservation sits in
-  the capacity step of their final length — never a step above — so no rebuild is
-  needed after the fact.
+  (`Difference`, `Intersection`, `Extend`, `Copy`) deliver a map whose
+  reservation sits in the capacity step of their final length — never a step
+  above — so no rebuild is needed after the fact. The two that cannot know their
+  result in advance estimate it from a probe of the operands and compact the
+  delivery; the estimate decides how much work is done, never what the set
+  contains.
 - **No rebuild loops.** The trigger rules are threshold *crossings*, not zones,
   so each capacity step is rebuilt at most once per monotone descent.
 - **Rebuilds are rare.** Rebuilding only happens when the element count crosses
@@ -189,11 +192,18 @@ a new hash seed. The 0.4% bound quantifies what it leaves behind; the crossing
 rule guarantees you pay for it at most once per step boundary crossed, so the
 amortised cost per deletion is `O(1)` with a small constant.
 
-`Difference` is worth calling out because it is the operation where a naive
-implementation pays twice. The delivered set is sized from the exact result
-count, using one extra pass over the smaller operand to count the intersection,
-so the result never needs a rebuild afterwards. When the subtraction provably
-cannot drop a step, the cheaper copy-and-delete path is used instead.
+The three binary set operations are worth calling out because they are where a
+naive implementation pays twice. Each of them has an unknown result to size a map
+for, and each resolves it differently: `Difference` reserves the upper bound and
+lets the compaction take back the difference, while `Extend` and `Intersection`
+probe a few hundred elements of their operands to estimate how much will survive
+before reserving. All three deliver a set already on the step of its final
+length, so none of them needs a rebuild afterwards. `docs/set-rehash-en.md` §2.4
+and §2.5 derive the choice and bound the probe's error.
+
+`Difference` also keeps the cheap path for the case where no step can be crossed:
+when the subtraction provably cannot drop the result far enough, it copies and
+deletes instead of walking the misses into a fresh map.
 
 ## Performance
 

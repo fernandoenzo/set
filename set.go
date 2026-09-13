@@ -13,6 +13,7 @@ import (
 	"iter"
 	"maps"
 	"math/bits"
+	"slices"
 )
 
 // Set is an unordered set of comparable values.
@@ -118,22 +119,48 @@ func (s *Set[T]) Extend(sets ...*Set[T]) {
 	for _, other := range sets {
 		extLen += other.Len()
 	}
-	s.ensure(extLen)
-	makeNew := false
-	var total int
-	if left := s.estimatedSlotsLeft(); left < extLen {
-		total = s.Len() + extLen
-		makeNew = 2*(left+s.Len()) < theoreticalSlots(total)
+
+	// The arguments' elements need not be new: a union of two sets that share
+	// half their elements grows the receiver by half of what they weigh, and
+	// they overlap among themselves as well as with s. Folding the arguments
+	// from the largest down, and probing each for elements absent from s and
+	// from the arguments already folded, estimates each one's contribution in
+	// turn and sums them. Reserving the whole upper bound instead leaves an
+	// over-allocation that the compaction below then has to undo with a second
+	// pass over the result.
+	target := s.Len() + extLen
+	if target >= samplingFloor {
+		order := make([]*Set[T], len(sets))
+		copy(order, sets)
+		slices.SortFunc(order, func(x, y *Set[T]) int { return y.Len() - x.Len() })
+		estimate := s.Len()
+		for i, other := range order {
+			if other.Len() == 0 {
+				continue
+			}
+			estimate += sampleCount(other, func(v T) bool {
+				if _, in := s.set[v]; in {
+					return false
+				}
+				for _, prev := range order[:i] {
+					if _, in := prev.set[v]; in {
+						return false
+					}
+				}
+				return true
+			})
+		}
+		target = estimate
 	}
-	if makeNew {
-		s.resize(total)
+
+	s.ensure(target)
+	if left := s.estimatedSlotsLeft(); left < extLen && 2*(left+s.Len()) < theoreticalSlots(target) {
+		s.resize(target)
 	}
 	for _, other := range sets {
 		maps.Copy(s.set, other.set)
 	}
-	if makeNew && hintOversized(total, s.Len()) {
-		s.Rehash()
-	}
+	s.compact()
 }
 
 // Retain keeps, in place, the elements present in every set. With no sets it
@@ -145,6 +172,9 @@ func (s *Set[T]) Retain(sets ...*Set[T]) {
 	all := make([]*Set[T], 0, len(sets)+1)
 	all = append(all, sets...)
 	all = append(all, s)
+	// Intersection's result is compacted to its own length, so the assignment
+	// adopts the step the surviving elements need rather than the step the
+	// receiver reserved before dropping them.
 	*s = *Intersection(all...)
 }
 
@@ -163,25 +193,19 @@ func (s *Set[T]) Difference(other *Set[T]) *Set[T] {
 		return res
 	}
 
-	// Otherwise the result may land a step lower. Counting the common elements
-	// costs one pass over the smaller set and buys a map sized exactly for the
-	// result, so the delivered set is never over-allocated and never rebuilt.
-	small, large := s, other
-	if n < m {
-		small, large = large, small
-	}
-	common := 0
-	for v := range small.set {
-		if _, in := large.set[v]; in {
-			common++
-		}
-	}
-	res := New[T](m - common)
+	// Otherwise the result may land a step lower. One pass over s, probing other
+	// and keeping the misses, fills a map reserved for the upper bound m; the
+	// compaction below returns it to the step of its final length. Counting the
+	// common elements first would cost a second pass over the smaller operand to
+	// buy a reservation that is only closer than this one, and the map rounds
+	// both to the same step often enough that the pass is not worth its price.
+	res := New[T](m)
 	for v := range s.set {
 		if _, in := other.set[v]; !in {
 			res.set[v] = struct{}{}
 		}
 	}
+	res.compact()
 	return res
 }
 
@@ -311,7 +335,38 @@ func Intersection[T comparable](sets ...*Set[T]) *Set[T] {
 	if minSet.Len() == 0 {
 		return New[T](0)
 	}
-	res := New[T](minSet.Len())
+
+	// The result is a subset of the smallest operand, but is usually far
+	// smaller: reserving its length over-allocates by a factor that reaches two
+	// whole steps when the operands overlap halfway, and the delivered set then
+	// has to be rebuilt. Probing part of the smallest operand estimates how much
+	// will survive and sizes the map from that instead.
+	//
+	// The probe only replaces the reservation, never the answer, so an estimate
+	// that lands a step out is corrected by the same rebuild the over-allocation
+	// would have caused. It is skipped below samplingFloor because a small set
+	// has no wrong reservation worth the probe, and it is not worth one at all
+	// in the disjoint case, where nothing survives and the rebuild is the work
+	// that has to happen either way.
+	capacity := minSet.Len()
+	if capacity >= samplingFloor {
+		inMin := func(v T) bool {
+			for _, other := range sets {
+				if other == minSet {
+					continue
+				}
+				if _, in := other.set[v]; !in {
+					return false
+				}
+			}
+			return true
+		}
+		if est := sampleCount(minSet, inMin); est < capacity {
+			capacity = est
+		}
+	}
+
+	res := New[T](capacity)
 	for v := range minSet.set {
 		inAll := true
 		for _, other := range sets {
@@ -327,10 +382,61 @@ func Intersection[T comparable](sets ...*Set[T]) *Set[T] {
 			res.set[v] = struct{}{}
 		}
 	}
-	if hintOversized(minSet.Len(), res.Len()) {
-		res.Rehash()
-	}
+	res.compact()
 	return res
+}
+
+// overlapSample is how many elements of an operand are probed to estimate an
+// intersection before the result is sized. Map iteration order is randomised,
+// so the probe is a uniform sample and the estimate is unbiased: its error is
+// the binomial standard error sqrt((1-p)/(p·overlapSample)), which peaks at 6%
+// for p = 1/2 and shrinks as the overlap grows. A wrong estimate cannot change
+// an answer — only leave the reservation off its step, which a rebuild then
+// corrects — so the sample needs to make those rebuilds rare, not impossible.
+// 256 keeps the error far inside the factor-of-two width of a step while
+// costing a rounding error against the pass it saves.
+const overlapSample = 256
+
+// samplingFloor is the size a set must reach before Intersection estimates its
+// result rather than reserving for the whole smallest operand. Unlike the other
+// callers, Intersection has no counting pass for the probe to replace, so it is
+// extra work there and only pays once it is a small fraction of the set: at
+// this floor the probe adds under 7% to the pass a wrong reservation repeats.
+const samplingFloor = overlapSample * 16
+
+// sampleCount returns how many elements of small satisfy keep. Up to
+// overlapSample elements are counted, which makes the answer exact; beyond
+// that a probe of the first overlapSample is scaled up. See overlapSample.
+func sampleCount[T comparable](small *Set[T], keep func(T) bool) int {
+	n := small.Len()
+	if n <= overlapSample {
+		count := 0
+		for v := range small.set {
+			if keep(v) {
+				count++
+			}
+		}
+		return count
+	}
+	probed, count := 0, 0
+	for v := range small.set {
+		if keep(v) {
+			count++
+		}
+		probed++
+		if probed == overlapSample {
+			break
+		}
+	}
+	return count * n / probed
+}
+
+// compact rebuilds the map when its reservation sits a step above its length,
+// so a set sized from an estimate still lands on the step of what it holds.
+func (s *Set[T]) compact() {
+	if hintOversized(s.capacity, s.Len()) {
+		s.Rehash()
+	}
 }
 
 // theoreticalSlots returns the slots make(map, hint) reserves on creation:

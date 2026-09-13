@@ -94,15 +94,65 @@ The last two lines are the heart of the design and read identically: **fire only
 hintOversized(hint, actual)  ⟺  T(hint) ≠ T(actual)
 ```
 
-Used only when building a new `Set` (`NewFromSlices`, `AddAll`, `Extend`, `Intersection`): if space was reserved for `hint` elements but far fewer remain, a whole memory step was crossed downward and the map is compacted. A freshly built map at load $\le 7/8$ is already at its natural size; reasoning further would just re-roll the same dice at the same cost with no expected gain.
+Used only when building a new `Set` (`NewFromSlices`, `AddAll`, `Extend`, `Difference`, `Intersection`): if space was reserved for `hint` elements but far fewer remain, a whole memory step was crossed downward and the map is compacted. A freshly built map at load $\le 7/8$ is already at its natural size; reasoning further would just re-roll the same dice at the same cost with no expected gain.
 
-`Difference` is the exception, and deliberately so: it wants the result on the step of its own length, so it cannot rely on a rebuild after the fact. It counts the intersection first — one extra pass over the smaller operand — and sizes the map exactly, so the result is never over-allocated and never rebuilt. When $T(m)=T(m-\min(m,n))$, no step can be crossed and the cheaper copy-and-delete path is taken instead.
+The three binary operations differ in how they choose `hint`, because each one knows something different about its result.
+
+`Difference` knows an upper bound and nothing else: the result holds at most $m$ elements, and how many survive depends on an overlap that is not known until the pass is made. It reserves `m` and lets `compact` return the map to the step of the final length. Counting the common elements first — a second pass over the smaller operand — would buy a reservation that is closer, but `make` rounds both to the same step often enough that the pass does not pay for itself.
 
 ```go
 Difference:
   if T(m) = T(m − min(m,n)):      res := Copy(s); res.Subtract(other)
-  else:                            count the common elements, then build with make(m − common)
+  else:                            fill make(m) with the misses, then compact
 ```
+
+`Extend` and `Intersection` face the same unknown, but they may **estimate** it instead of paying for a full pass. Each probes `overlapSample` elements of an operand and scales the result up (`sampleCount`, §2.5); the estimate sizes the map, and `compact` corrects it when the estimate landed a step out.
+
+```go
+Extend:
+  target := |s| + Σ|arg|, or an estimate when that reaches samplingFloor
+  append the arguments largest-first, probing each for elements new to s and to
+  the arguments already folded, and summing the estimates
+
+Intersection:
+  capacity := |smallest|, lowered to the estimate when it is above samplingFloor
+  keep the elements of the smallest present in all the others, then compact
+```
+
+A wrong estimate can never change an answer. It can only leave the reservation off its step, and `compact` then rebuilds — which is the same cost the over-allocation would have paid. The estimate therefore has to make that rebuild *rare*, not impossible; §2.5 gives the bound.
+
+### 2.5. `sampleCount` — how many probes, and why 256
+
+The estimate is the sample proportion scaled up:
+
+$$\hat{k}\ =\ n\cdot\frac{c}{s},\qquad s=\texttt{overlapSample},\quad c=\text{hits among the first } s \text{ elements}.$$
+
+**It is unbiased.** Go randomises map iteration order, so the first $s$ elements traversed are a uniform sample without replacement, and $\mathbb{E}[\hat{k}]=k$. No correctness argument depends on this — `compact` fixes any estimate — but it is what makes a small $s$ sufficient.
+
+**Its error is a binomial standard error.** The coefficient of variation of $\hat{k}$ is
+
+$$\mathrm{CV}\ =\ \sqrt{\frac{1-p}{p\,s}},\qquad p=\frac{k}{n},$$
+
+which **peaks at $p=1/2$ and shrinks as the overlap grows**. At $s=256$:
+
+| overlap $p$ | CV | 2σ error |
+|---|---|---|
+| $1\%$ | $62\%$ | $124\%$ |
+| $10\%$ | $19\%$ | $37\%$ |
+| $50\%$ | $6{,}3\%$ | $12{,}5\%$ |
+| $100\%$ | $0$ | $0$ |
+
+The low-overlap rows are the ones that look alarming and are in fact harmless: the quantity that matters is not the relative error of $p$ but **where the estimate lands relative to the step $T(n)$**. Write the estimate as $n\theta$ and the true value as $n p$; a rebuild happens when $T(n\theta)\ne T(np)$. Since the step function is a power of two, that needs $n\theta$ to be outside the same step as $np$, which for any $p$ below about $1/4$ is already free: both estimates and the true value sit *below* the smallest step a map of $n$ keys can land on, so all three are compacted to the same place. The probe only has to be accurate in the band where the outcome sits inside the step, and there $p\ge1/4$, so $\mathrm{CV}\le\sqrt{3/s}$.
+
+Setting that worst-case $2\sigma$ error to the width of a step gives the design rule. A step spans a factor of 2 in length, and the estimate only has to stay within a factor of $2^{1/2}$ of the truth to avoid a different step, i.e. a relative error under $41\%$:
+
+$$2\sqrt{\frac{3}{s}}\ \le\ 0{,}41\quad\Longrightarrow\quad s\ \ge\ \frac{4\cdot3}{0{,}41^2}\approx 71.$$
+
+$256$ is that bound with a factor of $3.6$ of margin, which is deliberate: the tail of the binomial around $1/2$ is very close to normal, so $2\sigma$ is not a hard guarantee, and the extra margin costs nothing. The probe is $s$ map lookups against a pass of $n$ — at the $10^6$ scale where the estimate starts to matter, $256$ lookups are $0.026\%$ of the work they are sizing.
+
+**Small sets opt out.** `samplingFloor` is `overlapSample * 16 = 4096`. The probe is worthwhile in proportion to how much of a wrong reservation it avoids: with $s=256$ and $n=4096$ it adds at most $6\%$ to the pass, and below that it grows as $1/n$ while the mistake it prevents shrinks as $n$. The measured crossover is around $n=10^3$, where the probe costs more than it saves.
+
+**`Intersection` is stricter than `Extend` for the same reason.** It has no counting pass for the probe to replace — the probe is pure addition there — so its floor has to clear the whole cost of a wrong reservation, not a fraction of it. The disjoint case illustrates it: $p=0$ means nothing survives, every reservation is wrong whatever its size, and the rebuild is unavoidable; the probe is pure overhead and both are the same work at $s=256$ as at $s=0$. What the probe buys is the $p\in(0,1)$ cases, which is exactly the band where its error is bounded.
 
 ---
 
