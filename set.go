@@ -74,8 +74,18 @@ func (s *Set[T]) Len() int {
 	return len(s.set)
 }
 
-// Add inserts the given elements.
-func (s *Set[T]) Add(e ...T) {
+// Add inserts a single element.
+func (s *Set[T]) Add(v T) {
+	s.ensure(1)
+	s.set[v] = struct{}{}
+}
+
+// AddAll inserts every given element.
+func (s *Set[T]) AddAll(e ...T) {
+	if len(e) == 1 {
+		s.Add(e[0])
+		return
+	}
 	s.ensure(len(e))
 	makeNew := false
 	var total int
@@ -126,9 +136,9 @@ func (s *Set[T]) Extend(sets ...*Set[T]) {
 	}
 }
 
-// Intersects keeps, in place, the elements present in every set. The name reads
-// like a query, but the method mutates the receiver.
-func (s *Set[T]) Intersects(sets ...*Set[T]) {
+// Retain keeps, in place, the elements present in every set. With no sets it
+// is a no-op; with a single set it keeps the elements of that set.
+func (s *Set[T]) Retain(sets ...*Set[T]) {
 	if len(sets) == 0 {
 		return
 	}

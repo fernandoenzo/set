@@ -84,11 +84,12 @@ func TestZeroValueWriters(t *testing.T) {
 		run     func(s *Set[int])
 		wantLen int
 	}{
-		{"Add()", func(s *Set[int]) { s.Add() }, 0},
 		{"Add(1)", func(s *Set[int]) { s.Add(1) }, 1},
-		{"Add(3)", func(s *Set[int]) { s.Add(1, 2, 3) }, 3},
-		{"Add(16)", func(s *Set[int]) { s.Add(makeSeq(16)...) }, 16},
-		{"Add(1000)", func(s *Set[int]) { s.Add(makeSeq(1000)...) }, 1000},
+		{"AddAll()", func(s *Set[int]) { s.AddAll() }, 0},
+		{"AddAll(1)", func(s *Set[int]) { s.AddAll(1) }, 1},
+		{"AddAll(3)", func(s *Set[int]) { s.AddAll(1, 2, 3) }, 3},
+		{"AddAll(16)", func(s *Set[int]) { s.AddAll(makeSeq(16)...) }, 16},
+		{"AddAll(1000)", func(s *Set[int]) { s.AddAll(makeSeq(1000)...) }, 1000},
 		{"AddSeq", func(s *Set[int]) { s.AddSeq(slices.Values([]int{7, 8})) }, 2},
 		{"AddSeq(empty)", func(s *Set[int]) { s.AddSeq(func(func(int) bool) {}) }, 0},
 		{"Extend()", func(s *Set[int]) { s.Extend() }, 0},
@@ -103,7 +104,7 @@ func TestZeroValueWriters(t *testing.T) {
 		{"Remove(absent)", func(s *Set[int]) { s.Remove(1, 2) }, 0},
 		{"Subtract()", func(s *Set[int]) { s.Subtract() }, 0},
 		{"Subtract(other)", func(s *Set[int]) { s.Subtract(other) }, 0},
-		{"Intersects(other)", func(s *Set[int]) { s.Intersects(other) }, 0},
+		{"Retain(other)", func(s *Set[int]) { s.Retain(other) }, 0},
 		{"Rehash()", func(s *Set[int]) { s.Rehash() }, 0},
 	}
 	for _, c := range writers {
@@ -197,7 +198,7 @@ func TestZeroValueSetAsArgument(t *testing.T) {
 		t.Fatalf("other - zero = %v, want %v", d.GetAll(), other.GetAll())
 	}
 	s := setOf(1, 2, 3)
-	s.Intersects(&z)
+	s.Retain(&z)
 	assertMatches(t, s, modelOf())
 }
 
@@ -288,7 +289,7 @@ func TestMutatorsMatchModel(t *testing.T) {
 			switch rng.IntN(6) {
 			case 0:
 				vals := randVals(rng, 3)
-				s.Add(vals...)
+				s.AddAll(vals...)
 				for _, v := range vals {
 					model[v] = struct{}{}
 				}
@@ -315,7 +316,7 @@ func TestMutatorsMatchModel(t *testing.T) {
 					delete(model, v)
 				}
 			case 5:
-				s.Intersects(other)
+				s.Retain(other)
 				for v := range model {
 					if !other.Contains(v) {
 						delete(model, v)
@@ -346,7 +347,7 @@ func TestSelfOperations(t *testing.T) {
 	assertMatches(t, s, modelOf())
 
 	s = setOf(1, 2, 3)
-	s.Intersects(s)
+	s.Retain(s)
 	assertMatches(t, s, modelOf(1, 2, 3))
 
 	s = setOf(1, 2, 3)
@@ -361,17 +362,17 @@ func TestSelfOperations(t *testing.T) {
 	s.Remove()
 	assertMatches(t, s, modelOf(1, 2, 3))
 
-	s.Add()
+	s.AddAll()
 	assertMatches(t, s, modelOf(1, 2, 3))
 }
 
-// Intersects must not write into the caller's backing array.
-func TestIntersectsDoesNotClobberCallerSlice(t *testing.T) {
+// Retain must not write into the caller's backing array.
+func TestRetainDoesNotClobberCallerSlice(t *testing.T) {
 	a := setOf(1, 2, 3, 4)
 	arg := setOf(2, 3, 4)
 	args := []*Set[int]{arg}
 
-	a.Intersects(args...)
+	a.Retain(args...)
 	if len(args) != 1 || args[0] != arg {
 		t.Fatalf("caller slice was modified: %v", args)
 	}
@@ -401,8 +402,8 @@ func TestDifferenceNeverOverAllocated(t *testing.T) {
 	}
 	for _, c := range cases {
 		s, other := New[int](0), New[int](0)
-		s.Add(makeSeq(c[0])...)
-		other.Add(makeSeq(c[1])...)
+		s.AddAll(makeSeq(c[0])...)
+		other.AddAll(makeSeq(c[1])...)
 
 		res := s.Difference(other)
 		if got, want := res.Len(), c[0]-c[1]; got != want {
@@ -427,7 +428,7 @@ func TestDifferenceNeverOverAllocated(t *testing.T) {
 // source's step rather than shrinking it.
 func TestDifferenceDisjointKeepsStep(t *testing.T) {
 	s := New[int](0)
-	s.Add(makeSeq(10000)...)
+	s.AddAll(makeSeq(10000)...)
 	other := NewFromSlices(disjointSeq(1000))
 
 	res := s.Difference(other)
@@ -471,17 +472,17 @@ func TestDifferenceLeavesOperandsIntact(t *testing.T) {
 	assertMatches(t, other, modelOf(makeSeq(200)...))
 }
 
-func TestIntersects(t *testing.T) {
+func TestRetain(t *testing.T) {
 	s := setOf(1, 2, 3, 4, 5)
-	s.Intersects(setOf(2, 3, 4), setOf(3, 4, 9))
+	s.Retain(setOf(2, 3, 4), setOf(3, 4, 9))
 	assertMatches(t, s, modelOf(3, 4))
 
 	s = setOf(1, 2, 3)
-	s.Intersects()
+	s.Retain()
 	assertMatches(t, s, modelOf(1, 2, 3))
 
 	s = setOf(1, 2, 3)
-	s.Intersects(setOf())
+	s.Retain(setOf())
 	assertMatches(t, s, modelOf())
 }
 
@@ -509,7 +510,7 @@ func TestGetAllAndIterAllAgree(t *testing.T) {
 // same cost. Both must be independent of the source.
 func TestCopyAndCloneContracts(t *testing.T) {
 	s := New[int](0)
-	s.Add(makeSeq(1000)...)
+	s.AddAll(makeSeq(1000)...)
 	s.Remove(makeSeq(900)...) // leaves 900..999
 
 	if got := s.Copy(); got.capacity != got.Len() {
@@ -567,7 +568,7 @@ func TestCloneOfZeroValueIsUsable(t *testing.T) {
 // length, dropping whatever the map reserved on its way down.
 func TestRehashCompactsToSmallestStep(t *testing.T) {
 	s := New[int](0)
-	s.Add(makeSeq(100_000)...)
+	s.AddAll(makeSeq(100_000)...)
 	if s.capacity != 100_000 {
 		t.Fatalf("capacity after Add = %d, want 100000", s.capacity)
 	}
@@ -599,11 +600,106 @@ func TestRehashOnZeroValue(t *testing.T) {
 // Remove of absent elements must not rebuild anything.
 func TestRemoveAbsentIsNoOp(t *testing.T) {
 	s := New[int](0)
-	s.Add(makeSeq(1000)...)
+	s.AddAll(makeSeq(1000)...)
 	before := s.capacity
 	s.Remove(-1, -2, -3)
 	if s.capacity != before || s.Len() != 1000 {
 		t.Fatalf("capacity changed to %d (was %d), Len = %d", s.capacity, before, s.Len())
+	}
+}
+
+// The single-element fast path in Add is justified by a property of
+// theoreticalSlots: it never decreases, and at most doubles when its argument
+// rises by one. From those two facts it follows that a one-element Add can
+// never want to resize, which is why skipping the step computation is a
+// simplification and not a behaviour change.
+//
+// These two tests are what make that reasoning checkable rather than asserted:
+// if a future change to the rounding breaks either property, the fast path
+// stops being valid and these fail.
+func TestTheoreticalSlotsIsNonDecreasing(t *testing.T) {
+	prev := theoreticalSlots(1)
+	for h := 2; h <= 2_000_000; h++ {
+		if got := theoreticalSlots(h); got < prev {
+			t.Fatalf("theoreticalSlots(%d) = %d < theoreticalSlots(%d) = %d",
+				h, got, h-1, prev)
+		} else {
+			prev = got
+		}
+	}
+}
+
+func TestTheoreticalSlotsAtMostDoublesPerStep(t *testing.T) {
+	prev := theoreticalSlots(1)
+	for h := 2; h <= 2_000_000; h++ {
+		got := theoreticalSlots(h)
+		if got > 2*prev {
+			t.Fatalf("theoreticalSlots(%d) = %d > 2*theoreticalSlots(%d) = %d",
+				h, got, h-1, 2*prev)
+		}
+		prev = got
+	}
+}
+
+// A one-element Add must never change the reserved capacity. Add has no
+// reservation policy by construction — a single insert provably cannot make
+// the policy fire — so if capacity ever moved here, the split would be a
+// regression. This walks a set across several step boundaries, which is where
+// a resize would occur if one were possible.
+func TestSingleAddNeverReserves(t *testing.T) {
+	s := New[int](1)
+	for i := range 200_000 {
+		before := s.capacity
+		s.Add(i)
+		if s.capacity != before {
+			t.Fatalf("Add(%d) changed capacity from %d to %d at Len %d",
+				i, before, s.capacity, s.Len())
+		}
+	}
+	if s.Len() != 200_000 {
+		t.Fatalf("Len = %d, want 200000", s.Len())
+	}
+}
+
+// Add and AddAll must agree on membership whatever the shape of the inserts:
+// one at a time, in batches, and with duplicates. They are two routes to the
+// same set, and the unit route takes the reservation policy out of the picture,
+// so this is what pins them together.
+func TestAddMatchesAddAll(t *testing.T) {
+	const n = 5_000
+	all := makeSeq(n)
+
+	oneAtATime := New[int](0)
+	for _, v := range all {
+		oneAtATime.Add(v)
+	}
+
+	for _, hint := range []int{0, 1, 64, n} {
+		inOneBatch := New[int](hint)
+		inOneBatch.AddAll(all...)
+		if !inOneBatch.Equal(oneAtATime) {
+			t.Fatalf("hint %d: one batch of %d disagrees with one at a time", hint, n)
+		}
+	}
+
+	for _, batch := range []int{2, 7, 64, 1000} {
+		inChunks := New[int](0)
+		for i := 0; i < n; i += batch {
+			inChunks.AddAll(all[i:min(i+batch, n)]...)
+		}
+		if !inChunks.Equal(oneAtATime) {
+			t.Fatalf("batch %d: chunked inserts disagree with one at a time", batch)
+		}
+	}
+
+	// Duplicates must not inflate Len on either route.
+	dup := New[int](0)
+	for range 100 {
+		dup.Add(7)
+	}
+	dup.AddAll(7, 7, 7, 7)
+	if dup.Len() != 1 {
+		t.Fatalf("Len = %d after duplicate inserts, want 1", dup.Len())
 	}
 }
 
