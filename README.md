@@ -18,8 +18,11 @@ s.Len()         // 2
 
 **Requirements.** Go 1.27 or later, as declared in `go.mod`. The module path is
 `github.com/fernandoenzo/set`; pin a release with
-`go get github.com/fernandoenzo/set@latest`. There are no dependencies to pull
+`go get github.com/fernandoenzo/set@v1.1.0`. There are no dependencies to pull
 in.
+
+The v1.0.x releases predate the `Add`/`AddAll` split and the `Intersects` to
+`Retain` rename, so the API documented here is the one from v1.1.0 onwards.
 
 ## The problem it solves
 
