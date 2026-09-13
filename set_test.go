@@ -705,6 +705,76 @@ func TestAddMatchesAddAll(t *testing.T) {
 
 // --- helpers used by the tests --------------------------------------------
 
+// Extend and Intersection size their result from a probe of the operands. The
+// estimate decides only how much room is reserved: whatever it says, the
+// delivered set must hold the right elements and sit on the step of its own
+// length, and the operands must be untouched.
+func TestEstimatedSizingStillDeliversOnStep(t *testing.T) {
+	cases := []struct{ m, n int }{
+		{0, 0}, {1, 0}, {0, 1}, {1, 1},
+		{4095, 4096}, {4096, 4096}, {4097, 4096},
+		{10000, 9999}, {10000, 10000}, {10000, 5000},
+		{50000, 50000}, {100000, 100000}, {100000, 50000}, {100000, 1},
+		{100000, 0},
+	}
+	for _, c := range cases {
+		s, other := NewFromSlices(makeSeq(c.m)), NewFromSlices(makeSeq(c.n))
+		sBefore, otherBefore := s.Len(), other.Len()
+
+		for name, got := range map[string]*Set[int]{
+			"Extend":       extendOf(s, other),
+			"Intersection": Intersection(s, other),
+		} {
+			if hintOversized(got.capacity, got.Len()) {
+				t.Fatalf("%s m=%d n=%d: capacity = %d reserves above the step for Len = %d",
+					name, c.m, c.n, got.capacity, got.Len())
+			}
+			if got.capacity < got.Len() {
+				t.Fatalf("%s m=%d n=%d: capacity = %d < Len = %d",
+					name, c.m, c.n, got.capacity, got.Len())
+			}
+		}
+
+		// The algebra must be right for every overlap, including the extremes
+		// the probe is least able to estimate.
+		inM := make(map[int]struct{}, c.m)
+		for v := range s.set {
+			inM[v] = struct{}{}
+		}
+		wantInter := modelOf()
+		for v := range other.set {
+			if _, in := inM[v]; in {
+				wantInter[v] = struct{}{}
+			}
+		}
+		assertMatches(t, Intersection(s, other), wantInter)
+		assertMatches(t, extendOf(s, other), modelOf(makeSeq(max(c.m, c.n))...))
+
+		if s.Len() != sBefore || other.Len() != otherBefore {
+			t.Fatalf("m=%d n=%d: operands mutated (%d/%d, want %d/%d)",
+				c.m, c.n, s.Len(), other.Len(), sBefore, otherBefore)
+		}
+	}
+}
+
+// Retain adopts the step its surviving elements need, not the one the receiver
+// held before dropping them.
+func TestRetainCompactsToResultStep(t *testing.T) {
+	s := NewFromSlices(makeSeq(100000))
+	s.Retain(NewFromSlices(makeSeq(1000)))
+	if s.Len() != 1000 {
+		t.Fatalf("Len() = %d, want 1000", s.Len())
+	}
+	if hintOversized(s.capacity, s.Len()) {
+		t.Fatalf("capacity = %d reserves above the step for Len = %d", s.capacity, s.Len())
+	}
+}
+
+// extendOf is Union through Extend, the path the estimation covers.
+func extendOf(sets ...*Set[int]) *Set[int] {
+	return Union(sets...)
+}
+
 func makeSeq(n int) []int {
 	out := make([]int, n)
 	for i := range out {

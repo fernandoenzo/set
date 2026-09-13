@@ -94,15 +94,65 @@ Las dos últimas líneas son el corazón del diseño y se leen igual: **dispara 
 hintOversized(hint, actual)  ⟺  T(hint) ≠ T(actual)
 ```
 
-Solo se usa al construir un `Set` nuevo (`NewFromSlices`, `AddAll`, `Extend`, `Intersection`): si se reservó para `hint` elementos pero quedaron bastantes menos, cruzó un escalón entero de memoria y se compacta. Un mapa recién creado con carga $\le 7/8$ ya está en su tamaño natural; razonarlo más sería volver a tirar los mismos dados con el mismo coste y sin esperanza de mejora.
+Solo se usa al construir un `Set` nuevo (`NewFromSlices`, `AddAll`, `Extend`, `Difference`, `Intersection`): si se reservó para `hint` elementos pero quedaron bastantes menos, cruzó un escalón entero de memoria y se compacta. Un mapa recién creado con carga $\le 7/8$ ya está en su tamaño natural; razonarlo más sería volver a tirar los mismos dados con el mismo coste y sin esperanza de mejora.
 
-`Difference` es la excepción, y a propósito: quiere el resultado en el escalón de su propia longitud, así que no puede confiar en una reconstrucción posterior. Cuenta primero la intersección —una pasada extra sobre el operando menor— y dimensiona el mapa exacto, de modo que el resultado nunca queda sobre-asignado ni se reconstruye. Cuando $T(m)=T(m-\min(m,n))$ no se puede cruzar ningún escalón y se toma el camino barato de copiar y borrar.
+Las tres operaciones binarias se diferencian en cómo eligen `hint`, porque cada una sabe algo distinto sobre su resultado.
+
+`Difference` conoce una cota superior y nada más: el resultado tiene a lo sumo $m$ elementos, y cuántos sobreviven depende de un solape que no se sabe hasta hacer la pasada. Reserva `m` y deja que `compact` devuelva el mapa al escalón de su longitud final. Contar antes los elementos comunes —una segunda pasada sobre el operando menor— compraría una reserva más ajustada, pero `make` redondea ambas al mismo escalón con la frecuencia suficiente para que la pasada no se pague.
 
 ```go
 Difference:
   si T(m) = T(m − min(m,n)):      res := Copy(s); res.Subtract(other)
-  si no:                          contar los comunes y construir con make(m − common)
+  si no:                          llenar make(m) con los que no están, y compactar
 ```
+
+`Extend` e `Intersection` se enfrentan a la misma incógnita, pero pueden **estimarla** en lugar de pagar una pasada completa. Cada una sondea `overlapSample` elementos de un operando y extrapola (`sampleCount`, §2.5); la estimación dimensiona el mapa, y `compact` la corrige cuando cayó en un escalón distinto.
+
+```go
+Extend:
+  objetivo := |s| + Σ|arg|, o una estimación cuando eso alcanza samplingFloor
+  añadir los argumentos de mayor a menor, sondeando en cada uno los elementos
+  nuevos para s y para los argumentos ya plegados, y sumando las estimaciones
+
+Intersection:
+  capacidad := |el menor|, rebajada a la estimación cuando supera samplingFloor
+  conservar los elementos del menor presentes en todos los demás, y compactar
+```
+
+Una estimación equivocada no puede cambiar una respuesta. Solo puede dejar la reserva fuera de su escalón, y entonces `compact` reconstruye — que es el mismo coste que habría pagado la sobre-asignación. La estimación tiene, por tanto, que hacer que esa reconstrucción sea *rara*, no imposible; §2.5 da la cota.
+
+### 2.5. `sampleCount` — cuántos sondeos, y por qué 256
+
+La estimación es la proporción muestral extrapolada:
+
+$$\hat{k}\ =\ n\cdot\frac{c}{s},\qquad s=\texttt{overlapSample},\quad c=\text{aciertos entre los primeros } s \text{ elementos}.$$
+
+**Es insesgada.** Go aleatoriza el orden de iteración del mapa, así que los primeros $s$ elementos recorridos son una muestra uniforme sin reemplazo y $\mathbb{E}[\hat{k}]=k$. Ningún argumento de corrección depende de esto —`compact` arregla cualquier estimación—, pero es lo que hace que un $s$ pequeño baste.
+
+**Su error es un error típico binomial.** El coeficiente de variación de $\hat{k}$ es
+
+$$\mathrm{CV}\ =\ \sqrt{\frac{1-p}{p\,s}},\qquad p=\frac{k}{n},$$
+
+que **alcanza su máximo en $p=1/2$ y disminuye según crece el solape**. Con $s=256$:
+
+| solape $p$ | CV | error $2\sigma$ |
+|---|---|---|
+| $1\%$ | $62\%$ | $124\%$ |
+| $10\%$ | $19\%$ | $37\%$ |
+| $50\%$ | $6{,}3\%$ | $12{,}5\%$ |
+| $100\%$ | $0$ | $0$ |
+
+Las filas de solape bajo son las que parecen alarmantes y son justamente las inofensivas: lo que importa no es el error relativo de $p$ sino **dónde cae la estimación respecto al escalón $T(n)$**. Escribiendo la estimación como $n\theta$ y el valor verdadero como $n p$, se reconstruye cuando $T(n\theta)\ne T(np)$. Como el escalón es una potencia de dos, eso exige que $n\theta$ quede fuera del mismo escalón que $np$, y para todo $p$ por debajo de $1/4$ aproximadamente eso ya es gratis: tanto las estimaciones como el valor verdadero caen *por debajo* del menor escalón en que puede aterrizar un mapa de $n$ claves, así que los tres se compactan al mismo sitio. El sondeo solo tiene que ser fino en la banda donde el resultado cae dentro del escalón, y allí $p\ge1/4$, luego $\mathrm{CV}\le\sqrt{3/s}$.
+
+Igualando ese error $2\sigma$ del peor caso a la anchura de un escalón sale la regla de diseño. Un escalón abarca un factor $2$ en longitud, y la estimación solo tiene que quedarse dentro de un factor $2^{1/2}$ de la verdad para no cambiar de escalón, es decir un error relativo por debajo del $41\%$:
+
+$$2\sqrt{\frac{3}{s}}\ \le\ 0{,}41\quad\Longrightarrow\quad s\ \ge\ \frac{4\cdot3}{0{,}41^2}\approx 71.$$
+
+$256$ es esa cota con un factor $3{,}6$ de margen, y es deliberado: la cola de la binomial alrededor de $1/2$ es muy parecida a la normal, así que $2\sigma$ no es una garantía dura, y el margen extra no cuesta nada. El sondeo son $s$ consultas al mapa frente a una pasada de $n$ — en la escala de $10^6$, donde la estimación empieza a importar, $256$ consultas son el $0{,}026\%$ del trabajo que están dimensionando.
+
+**Los conjuntos pequeños se autoexcluyen.** `samplingFloor` es `overlapSample * 16 = 4096`. El sondeo compensa en proporción a cuánto evita de una reserva equivocada: con $s=256$ y $n=4096$ añade como mucho un $6\%$ a la pasada, y por debajo de eso crece como $1/n$ mientras el error que evita encoge como $n$. El cruce medido está alrededor de $n=10^3$, donde el sondeo cuesta más de lo que ahorra.
+
+**`Intersection` es más estricta que `Extend` por la misma razón.** No tiene una pasada de conteo que el sondeo venga a sustituir —ahí el sondeo es adición pura—, así que su umbral tiene que cubrir el coste entero de una reserva equivocada, no una fracción. El caso disjunto lo ilustra: $p=0$ significa que no sobrevive nada, toda reserva es equivocada sea cual sea su tamaño, y la reconstrucción es inevitable; el sondeo es sobrecoste puro y ambos cuestan lo mismo con $s=256$ que con $s=0$. Lo que el sondeo compra son los casos $p\in(0,1)$, que es exactamente la banda donde su error está acotado.
 
 ---
 
