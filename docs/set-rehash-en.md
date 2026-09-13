@@ -94,7 +94,7 @@ The last two lines are the heart of the design and read identically: **fire only
 hintOversized(hint, actual)  ⟺  T(hint) ≠ T(actual)
 ```
 
-Used only when building a new `Set` (`NewFromSlices`, `Add`, `Extend`, `Intersection`): if space was reserved for `hint` elements but far fewer remain, a whole memory step was crossed downward and the map is compacted. A freshly built map at load $\le 7/8$ is already at its natural size; reasoning further would just re-roll the same dice at the same cost with no expected gain.
+Used only when building a new `Set` (`NewFromSlices`, `AddAll`, `Extend`, `Intersection`): if space was reserved for `hint` elements but far fewer remain, a whole memory step was crossed downward and the map is compacted. A freshly built map at load $\le 7/8$ is already at its natural size; reasoning further would just re-roll the same dice at the same cost with no expected gain.
 
 `Difference` is the exception, and deliberately so: it wants the result on the step of its own length, so it cannot rely on a rebuild after the fact. It counts the intersection first — one extra pass over the smaller operand — and sizes the map exactly, so the result is never over-allocated and never rebuilt. When $T(m)=T(m-\min(m,n))$, no step can be crossed and the cheaper copy-and-delete path is taken instead.
 

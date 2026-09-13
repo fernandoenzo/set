@@ -94,7 +94,7 @@ Las dos últimas líneas son el corazón del diseño y se leen igual: **dispara 
 hintOversized(hint, actual)  ⟺  T(hint) ≠ T(actual)
 ```
 
-Solo se usa al construir un `Set` nuevo (`NewFromSlices`, `Add`, `Extend`, `Intersection`): si se reservó para `hint` elementos pero quedaron bastantes menos, cruzó un escalón entero de memoria y se compacta. Un mapa recién creado con carga $\le 7/8$ ya está en su tamaño natural; razonarlo más sería volver a tirar los mismos dados con el mismo coste y sin esperanza de mejora.
+Solo se usa al construir un `Set` nuevo (`NewFromSlices`, `AddAll`, `Extend`, `Intersection`): si se reservó para `hint` elementos pero quedaron bastantes menos, cruzó un escalón entero de memoria y se compacta. Un mapa recién creado con carga $\le 7/8$ ya está en su tamaño natural; razonarlo más sería volver a tirar los mismos dados con el mismo coste y sin esperanza de mejora.
 
 `Difference` es la excepción, y a propósito: quiere el resultado en el escalón de su propia longitud, así que no puede confiar en una reconstrucción posterior. Cuenta primero la intersección —una pasada extra sobre el operando menor— y dimensiona el mapa exacto, de modo que el resultado nunca queda sobre-asignado ni se reconstruye. Cuando $T(m)=T(m-\min(m,n))$ no se puede cruzar ningún escalón y se toma el camino barato de copiar y borrar.
 

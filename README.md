@@ -8,7 +8,8 @@ after large deletions.
 import "github.com/fernandoenzo/set"
 
 s := set.New[string](16)
-s.Add("a", "b", "c")
+s.Add("a")
+s.AddAll("b", "c")
 
 s.Remove("b")
 s.Contains("a") // true
@@ -17,7 +18,7 @@ s.Len()         // 2
 
 **Requirements.** Go 1.27 or later, as declared in `go.mod`. The module path is
 `github.com/fernandoenzo/set`; pin a release with
-`go get github.com/fernandoenzo/set@v1.0.0`. There are no dependencies to pull
+`go get github.com/fernandoenzo/set@latest`. There are no dependencies to pull
 in.
 
 ## The problem it solves
@@ -66,7 +67,7 @@ same as a Go map. That is a deliberate design decision, not an omission.
 An internal lock cannot be added without breaking the API and the performance
 guarantees, for three measured reasons:
 
-- **It would deadlock on self-operations.** `s.Extend(s)` and `s.Intersects(s)`
+- **It would deadlock on self-operations.** `s.Extend(s)` and `s.Retain(s)`
   re-enter the receiver while it is locked. A non-recursive mutex blocks and a
   recursive one hides the aliasing instead of fixing it.
 - **It would have to copy the lock.** `resize` replaces the receiver wholesale
@@ -133,7 +134,8 @@ wrapper, not in this type.
 
 | Method | Description |
 |---|---|
-| `Add(e ...T)` | Insert elements. A batch big enough to leave the current step is served by a single rebuild. |
+| `Add(v T)` | Insert one element. |
+| `AddAll(e ...T)` | Insert elements. A batch big enough to leave the current step is served by a single rebuild. |
 | `AddSeq(it iter.Seq[T])` | Insert every element produced by an iterator. |
 | `Extend(sets ...*Set[T])` | Add every element of the given sets. |
 
@@ -155,7 +157,7 @@ wrapper, not in this type.
 |---|---|
 | `Remove(e ...T)` | Delete elements; absent ones are ignored. Never triggers a rebuild on its own. |
 | `Subtract(sets ...*Set[T])` | Delete, in place, every element of the given sets. |
-| `Intersects(sets ...*Set[T])` | Keep, in place, the elements present in every set. Despite the name, it mutates the receiver. |
+| `Retain(sets ...*Set[T])` | Keep, in place, the elements present in every set. |
 | `Rehash()` | Rebuild the map sized for exactly the current length. |
 
 ### Derived sets
@@ -198,7 +200,7 @@ indicative; benchmark on your own workload.
 | Operation | Cost |
 |---|---|
 | `Add` on the zero value | 2 allocations, one 8-slot map |
-| `Add` of 1000 elements | 6 allocations |
+| `AddAll` of 1000 elements | 6 allocations |
 | `Contains` | one map lookup, no allocation |
 | `IsSubset` / `Disjoint` | no allocation |
 | `GetAll` | one allocation (the result slice) |
