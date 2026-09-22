@@ -77,7 +77,9 @@ There is no Makefile, no CI configuration and no lint or coverage target. The su
 | File | Role |
 |---|---|
 | `set.go` | The entire package: `Set[T]`, `New`, `NewFromSlices`, every method, `Union`, `Intersection`, `sampleCount`, `theoreticalSlots`, `needsRehash`, `hintOversized` |
-| `set_test.go` | The only test file: 25 tests, exhaustive algebra against a model |
+| `set_test.go` | The behavioural suite: 25 tests, exhaustive algebra against a model |
+| `bench_test.go` | The benchmarks behind the README's Performance table (`go test -bench .`) |
+| `LICENSE` | GPLv3 full text (byte-identical to `nvfp/LICENSE`) |
 | `go.mod` | Module path and Go version (`go 1.27.1`); no dependencies, so no `go.sum` |
 | `README.md` | User-facing contract: guarantees, API tables, cost model, concurrency rationale, and the derivation of the 256-element sample (Cochran's formula) |
 | `docs/set-rehash-en.md` | Full derivation with proofs: reservation model, why the trigger is forced to be a crossing, the Excess Theorem and its 0.4% bound, termination, numerical checks |
@@ -102,6 +104,7 @@ There is no Makefile, no CI configuration and no lint or coverage target. The su
 ## Testing & QA
 
 - Run everything: `go test ./...` (25 tests, sub-second) and `go test -race ./...`.
+- Benchmarks live in `bench_test.go` and cover every row of the README's Performance table; run them with `go test -bench . -benchmem`. They use `b.Loop()` except the three mutating ones (`Remove`, `Rehash`, `Extend`), which need `StopTimer`/`StartTimer` around their setup and therefore the classic `b.N` form — `b.Loop` panics if called with the timer stopped. If a row of the table changes, the matching benchmark must change with it: the table must stay reproducible from `go test -bench .` alone.
 - The suite runs against a reference model, not mocks: `map[int]struct{}` for membership and `slices`/`maps` for the algebra.
 - Coverage is contractual, not structural. The fixed contracts are: every writer and reader against the zero value (`TestZeroValueWriters`, `TestZeroValueReaders`, `TestZeroValueSetAsArgument`), the full algebra against the model (`TestSetAlgebraMatchesModel`, `TestMutatorsMatchModel`), the `Copy`/`Clone` reservation contracts (`TestCopyAndCloneContracts`), `Rehash` landing on the smallest step (`TestRehashCompactsToSmallestStep`), `Difference` delivering an exactly-sized result (`TestDifferenceNeverOverAllocated`, `TestDifferenceDisjointKeepsStep`), self-operations (`TestSelfOperations`), and the estimator still delivering on a step (`TestEstimatedSizingStillDeliversOnStep`).
 - Tests may read unexported state (`s.capacity`) where the contract *is* the reservation; that is deliberate and is what pins the model to the behaviour.
@@ -111,4 +114,4 @@ There is no Makefile, no CI configuration and no lint or coverage target. The su
 
 ## License
 
-The repository ships no `LICENSE` file and the README states no license; the module is published as `github.com/fernandoenzo/set`. Do not add a license header to source files without asking.
+GPLv3+. The full text is in [`LICENSE`](LICENSE), which is byte-identical to the one in `nvfp/`; the README's "License" section points at it. Do not add a license header to source files without asking.

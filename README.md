@@ -41,6 +41,7 @@ github.com/fernandoenzo/set@v1.1.0`. There are no dependencies to pull in.
   - [Why small sets opt out](#why-small-sets-opt-out)
   - [A caveat on exactness](#a-caveat-on-exactness)
 - [Verifying the design](#verifying-the-design)
+- [License](#license)
 - [Documentation](#documentation)
 
 ## The problem it solves
@@ -213,17 +214,22 @@ amortised cost per deletion is `O(1)` with a small constant.
 
 The three binary set operations are worth calling out because they are where a
 naive implementation pays twice. Each of them has an unknown result to size a map
-for, and each resolves it differently: `Difference` reserves the upper bound and
-lets the compaction take back the difference, while `Extend` and `Intersection`
-probe a few hundred elements of their operands to estimate how much will survive
-before reserving. All three deliver a set already on the step of its final
-length, so none of them needs a rebuild afterwards. The probe's sample size and
-its error are derived in "Why the probe samples 256 elements" below; the rehash
-rules themselves in `docs/set-rehash-en.md`.
+for, and each resolves it differently: `Extend` and `Intersection` probe a few
+hundred elements of their operands to estimate how much will survive before
+reserving, while `Difference` reserves for the receiver's length and lets the
+compaction take back whatever did not survive. All three deliver a set already on
+the step of its final length, so none of them needs a rebuild afterwards. The
+probe's sample size and its error are derived in "Why the probe samples 256
+elements" below; the rehash rules themselves in `docs/set-rehash-en.md`.
 
-`Difference` also keeps the cheap path for the case where no step can be crossed:
-when the subtraction provably cannot drop the result far enough, it copies and
-deletes instead of walking the misses into a fresh map.
+Reserving for the receiver is `Difference`'s cost: a small result out of a large
+receiver still allocates, and touches, a map of the receiver's size for the
+duration of the call. The trade is deliberate — the alternative, counting the
+common elements first, costs a second full pass over the smaller operand to buy a
+reservation that `make` rounds to the same step in the common case. `Difference`
+also keeps the cheap path for the case where no step can be crossed: when the
+subtraction provably cannot drop the result far enough, it copies and deletes
+instead of walking the misses into a fresh map.
 
 ## Performance
 
@@ -237,12 +243,13 @@ indicative; benchmark on your own workload.
 | `Contains` | one map lookup, no allocation |
 | `IsSubset` / `Disjoint` | no allocation |
 | `GetAll` | one allocation (the result slice) |
-| `Difference` | allocation proportional to the result, never to the source |
+| `Difference` | peak allocation proportional to the **receiver's length**, not to the result: the result map is reserved for the receiver and compacted below, so a tiny result out of a huge source still allocates (and briefly touches) a map of the source's size. The delivered set is left on the step of its own length. |
 
 Hot loops range directly over the internal map rather than going through
 iterators, and results are pre-sized, so the common paths do not allocate beyond
-the container itself. `go test -bench .` in the repository reports the numbers
-for the current machine.
+the container itself. `go test -bench .` runs the benchmarks in
+[`bench_test.go`](bench_test.go), which are the source of the numbers above and
+report them for your own machine.
 
 ## Why the probe samples 256 elements
 
@@ -397,12 +404,18 @@ any deviation — but the distribution should not be read as a guarantee.
 go test ./...          # behavioural suite, exhaustive algebra against a model
 go test -race ./...    # no shared state, but the suite is race-clean
 go vet ./...
+go test -bench .       # the numbers quoted in "Performance" above
 ```
 
 The test suite fixes the observable contracts: every reader and writer against
 the zero value, the full algebra against a reference model, the `Copy`/`Clone`
 reservation contracts, `Rehash` landing on the smallest step, `Difference`
 delivering an exactly-sized result, and self-operations such as `s.Extend(s)`.
+The benchmarks in `bench_test.go` cover every row of the Performance table.
+
+## License
+
+This project is licensed under the [GNU General Public License v3 or later (GPLv3+)](https://choosealicense.com/licenses/gpl-3.0/). See [`LICENSE`](LICENSE) for the full text.
 
 ## Documentation
 
