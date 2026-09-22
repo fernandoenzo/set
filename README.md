@@ -413,6 +413,21 @@ reservation contracts, `Rehash` landing on the smallest step, `Difference`
 delivering an exactly-sized result, and self-operations such as `s.Extend(s)`.
 The benchmarks in `bench_test.go` cover every row of the Performance table.
 
+`theoretical_slots_test.go` ties the reservation model to the runtime it models:
+it reads the real slot count out of a freshly made map (through the runtime's
+map layout, behind `unsafe`) and checks `theoreticalSlots` against it. That is
+the one assumption the whole design rests on — the rehash trigger, the compaction
+rule, the 0.4% bound — and without the test a change in `internal/runtime/maps`
+would leave the suite green while the set silently rebuilt too often or too
+rarely. It checks every point where the reservation can change (each capacity
+step boundary and each crack where the runtime's usable budget falls below the
+hint) in about a second. The exhaustive sweep of every hint up to 300,000 is
+opt-in, because it costs minutes:
+
+```sh
+SET_XCHECK_FULL=1 go test ./...
+```
+
 ## License
 
 This project is licensed under the [GNU General Public License v3 or later (GPLv3+)](https://choosealicense.com/licenses/gpl-3.0/). See [`LICENSE`](LICENSE) for the full text.
