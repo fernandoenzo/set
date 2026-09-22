@@ -20,8 +20,28 @@ s.Len()         // 2
 `github.com/fernandoenzo/set`; pin a release with `go get
 github.com/fernandoenzo/set@v1.1.0`. There are no dependencies to pull in.
 
-The v1.0.x releases predate the `Add`/`AddAll` split and the `Intersects` to
-`Retain` rename, so the API documented here is the one from v1.1.0 onwards.
+## Table of contents
+
+- [The problem it solves](#the-problem-it-solves)
+- [Guarantees](#guarantees)
+  - [Concurrency](#concurrency)
+- [API](#api)
+  - [Construction](#construction)
+  - [Adding](#adding)
+  - [Reading](#reading)
+  - [Removing](#removing)
+  - [Derived sets](#derived-sets)
+  - [Copies](#copies)
+- [What a rebuild costs](#what-a-rebuild-costs)
+- [Performance](#performance)
+- [Why the probe samples 256 elements](#why-the-probe-samples-256-elements)
+  - [The sampling distribution is hypergeometric](#the-sampling-distribution-is-hypergeometric)
+  - [From hypergeometric to binomial to normal](#from-hypergeometric-to-binomial-to-normal)
+  - [Where 256 comes from: Cochran's formula](#where-256-comes-from-cochrans-formula)
+  - [Why small sets opt out](#why-small-sets-opt-out)
+  - [A caveat on exactness](#a-caveat-on-exactness)
+- [Verifying the design](#verifying-the-design)
+- [Documentation](#documentation)
 
 ## The problem it solves
 
