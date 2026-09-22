@@ -78,18 +78,19 @@ There is no Makefile, no CI configuration and no lint or coverage target. The su
 |---|---|
 | `set.go` | The entire package: `Set[T]`, `New`, `NewFromSlices`, every method, `Union`, `Intersection`, `sampleCount`, `theoreticalSlots`, `needsRehash`, `hintOversized` |
 | `set_test.go` | The only test file: 25 tests, exhaustive algebra against a model |
-| `go.mod` | Module path and Go version (`go 1.27.0`); no dependencies, so no `go.sum` |
+| `go.mod` | Module path and Go version (`go 1.27.1`); no dependencies, so no `go.sum` |
 | `README.md` | User-facing contract: guarantees, API tables, cost model, concurrency rationale, and the derivation of the 256-element sample (Cochran's formula) |
 | `docs/set-rehash-en.md` | Full derivation with proofs: reservation model, why the trigger is forced to be a crossing, the Excess Theorem and its 0.4% bound, termination, numerical checks |
 | `docs/set-rehash-es.md` | The same document in Spanish; the two must stay in sync |
 
 ## Runtime/Tooling Preferences
 
-- **Language**: Go 1.27 — `go 1.27.0` in `go.mod`; developed and verified against `go1.27.1`.
+- **Language**: Go 1.27 — the `go` directive in `go.mod` pins the newest available patch (currently `1.27.1`); bump it when a new patch ships.
 - **Dependencies**: none. Standard library only (`iter`, `maps`, `slices`, `math/bits` in `set.go`; `math/rand/v2`, `slices`, `testing` in the suite). No `go.sum`, no mocking library, no assertion library.
 - **API shape**: generics only (`Set[T comparable]`), pointer receiver for every mutator and reader, free functions (`Union`, `Intersection`) for the operations that need no receiver.
 - **Docs are bilingual**: `docs/set-rehash-en.md` and `docs/set-rehash-es.md` are the same argument in two languages; a change to one is a change to both.
 - **Published versions**: v1.1.0 is the current API (the `Add`/`AddAll` split and the `Intersects` → `Retain` rename landed after v1.0.x). The README documents v1.1.0 onwards.
+- **The `go` directive is a consumer requirement**: it gates download, not only the local toolchain, so a `go 1.27.1` module makes older toolchains fetch a newer one or fail. Raising it is a breaking change for consumers; only raise it above the newest patch with a reason.
 
 ## Git Workflow
 
