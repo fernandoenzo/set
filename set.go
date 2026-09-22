@@ -357,7 +357,9 @@ func Intersection[T comparable](sets ...*Set[T]) *Set[T] {
 	// The result is a subset of the smallest operand but usually far smaller:
 	// reserving its length over-allocates by up to two steps when the operands
 	// overlap, and the delivery then has to be rebuilt. Probe the operand to
-	// size for the estimate instead. See README.
+	// size for the estimate instead. sampleCount never returns more than the
+	// population it probed, so the estimate is already bounded by the smallest
+	// operand. See README.
 	capacity := minSet.Len()
 	if capacity >= samplingFloor {
 		inMin := func(v T) bool {
@@ -371,9 +373,7 @@ func Intersection[T comparable](sets ...*Set[T]) *Set[T] {
 			}
 			return true
 		}
-		if est := sampleCount(minSet, inMin); est < capacity {
-			capacity = est
-		}
+		capacity = sampleCount(minSet, inMin)
 	}
 
 	res := New[T](capacity)
