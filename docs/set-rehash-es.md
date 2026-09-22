@@ -98,26 +98,21 @@ Solo se usa al construir un `Set` nuevo (`NewFromSlices`, `AddAll`, `Extend`, `D
 
 Las tres operaciones binarias se diferencian en cómo eligen `hint`, porque cada una sabe algo distinto sobre su resultado.
 
-`Difference` conoce una cota superior y nada más: el resultado tiene a lo sumo $m$ elementos, y cuántos sobreviven depende de un solape que no se sabe hasta hacer la pasada. Reserva `m` y deja que `compact` devuelva el mapa al escalón de su longitud final. Contar antes los elementos comunes —una segunda pasada sobre el operando menor— compraría una reserva más ajustada, pero `make` redondea ambas al mismo escalón con la frecuencia suficiente para que la pasada no se pague.
+`Difference` conserva el camino barato cuando ningún escalón puede cruzarse y, en caso contrario, dimensiona el mapa con un sondeo, igual que las otras dos. Sondear el operando **menor** es lo que lo hace funcionar en ambas direcciones: sondear `other` estima la intersección, así que lo que queda de $s$ es el resultado ($m$ menos la estimación), y sondear $s$ cuenta directamente los que no están. Por debajo de `samplingFloor` el sondeo cuesta más de lo que ahorra, así que recurre a la cota superior `m`. Reservar `m` —lo que hacía el código antes de que el §2.4 incorporase el sondeo— hace que un resultado diminuto sobre un receptor grande asigne un mapa del tamaño del receptor; el sondeo elimina ese coste sin tocar el resultado.
 
 ```go
 Difference:
   si T(m) = T(m − min(m,n)):      res := Copy(s); res.Subtract(other)
-  si no:                          llenar make(m) con los que no están, y compactar
+  si no:                          res := make(differenceReservation(s, other))
+                                  llenar res con los que no están, y compactar
+
+differenceReservation:
+  si min(m,n) < samplingFloor:    return m
+  si n < m:                       return m − sampleCount(other, s.Contains)
+  si no:                          return sampleCount(s, v ↦ v ∉ other)
 ```
 
-`Extend` e `Intersection` se enfrentan a la misma incógnita, pero pueden **estimarla** en lugar de pagar una pasada completa. Cada una sondea `overlapSample` elementos de un operando y extrapola (`sampleCount`, §2.5); la estimación dimensiona el mapa, y `compact` la corrige cuando cayó en un escalón distinto.
-
-```go
-Extend:
-  objetivo := |s| + Σ|arg|, o una estimación cuando eso alcanza samplingFloor
-  añadir los argumentos de mayor a menor, sondeando en cada uno los elementos
-  nuevos para s y para los argumentos ya plegados, y sumando las estimaciones
-
-Intersection:
-  capacidad := |el menor|, rebajada a la estimación cuando supera samplingFloor
-  conservar los elementos del menor presentes en todos los demás, y compactar
-```
+`Extend` e `Intersection` se enfrentan a la misma incógnita, pero cada una dimensiona desde su propio sondeo: `Extend` sondea cada argumento en busca de elementos nuevos para `s` y para los argumentos ya plegados, e `Intersection` sondea el operando menor en busca de pertenencia a todos los demás.
 
 Una estimación equivocada no puede cambiar una respuesta. Solo puede dejar la reserva fuera de su escalón, y entonces `compact` reconstruye — que es el mismo coste que habría pagado la sobre-asignación. La estimación tiene, por tanto, que hacer que esa reconstrucción sea *rara*, no imposible; §2.5 da la cota.
 

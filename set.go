@@ -188,10 +188,9 @@ func (s *Set[T]) Difference(other *Set[T]) *Set[T] {
 	}
 
 	// The result may land a step lower. One pass over s keeping the misses,
-	// reserved for the upper bound and compacted below, beats counting the
-	// common elements first: that second pass buys a reservation make rounds to
-	// the same step anyway.
-	res := New[T](m)
+	// reserved from a probe of the smaller operand and compacted below. See
+	// README, "Why the probe samples 256 elements".
+	res := New[T](differenceReservation(s, other))
 	for v := range s.set {
 		if _, in := other.set[v]; !in {
 			res.set[v] = struct{}{}
@@ -199,6 +198,25 @@ func (s *Set[T]) Difference(other *Set[T]) *Set[T] {
 	}
 	res.compact()
 	return res
+}
+
+// differenceReservation returns the hint to reserve for s − other. Above the
+// sampling floor it estimates the result from a probe of the smaller operand,
+// the way Intersection sizes itself: probing other estimates the intersection,
+// so what is left of s is the result, and probing s counts the misses directly.
+// Below the floor, where the probe costs more than the sizing it saves, it falls
+// back to the upper bound. A wrong estimate only moves the reservation —
+// compact corrects it — so this decides how much work is done, never what the
+// set contains.
+func differenceReservation[T comparable](s, other *Set[T]) int {
+	m, n := s.Len(), other.Len()
+	if min(m, n) < samplingFloor {
+		return m
+	}
+	if n < m {
+		return m - sampleCount(other, s.Contains)
+	}
+	return sampleCount(s, func(v T) bool { return !other.Contains(v) })
 }
 
 // Subtract deletes, in place, the elements of the given sets.

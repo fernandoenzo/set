@@ -98,26 +98,21 @@ Used only when building a new `Set` (`NewFromSlices`, `AddAll`, `Extend`, `Diffe
 
 The three binary operations differ in how they choose `hint`, because each one knows something different about its result.
 
-`Difference` knows an upper bound and nothing else: the result holds at most $m$ elements, and how many survive depends on an overlap that is not known until the pass is made. It reserves `m` and lets `compact` return the map to the step of the final length. Counting the common elements first — a second pass over the smaller operand — would buy a reservation that is closer, but `make` rounds both to the same step often enough that the pass does not pay for itself.
+`Difference` keeps the cheap path when no step can be crossed, and otherwise sizes the map from a probe, like the other two. Probing the **smaller** operand is what makes this work in both directions: probing `other` estimates the intersection, so what is left of $s$ is the result ($m$ minus the estimate), and probing $s$ counts the misses directly. Below `samplingFloor` the probe costs more than the sizing it saves, so it falls back to the upper bound `m`. Reserving `m` — what the code did before §2.4 gained the probe — makes a tiny result out of a large receiver allocate a map of the receiver's size; the probe removes that cost without touching the result.
 
 ```go
 Difference:
   if T(m) = T(m − min(m,n)):      res := Copy(s); res.Subtract(other)
-  else:                            fill make(m) with the misses, then compact
+  else:                            res := make(differenceReservation(s, other))
+                                   fill res with the misses, then compact
+
+differenceReservation:
+  if min(m,n) < samplingFloor:     return m
+  if n < m:                        return m − sampleCount(other, s.Contains)
+  else:                            return sampleCount(s, v ↦ v ∉ other)
 ```
 
-`Extend` and `Intersection` face the same unknown, but they may **estimate** it instead of paying for a full pass. Each probes `overlapSample` elements of an operand and scales the result up (`sampleCount`, §2.5); the estimate sizes the map, and `compact` corrects it when the estimate landed a step out.
-
-```go
-Extend:
-  target := |s| + Σ|arg|, or an estimate when that reaches samplingFloor
-  append the arguments largest-first, probing each for elements new to s and to
-  the arguments already folded, and summing the estimates
-
-Intersection:
-  capacity := |smallest|, lowered to the estimate when it is above samplingFloor
-  keep the elements of the smallest present in all the others, then compact
-```
+`Extend` and `Intersection` face the same unknown, but each sizes from a probe of its own: `Extend` probes each argument for elements new to `s` and to the arguments already folded, and `Intersection` probes the smallest operand for membership in all the others.
 
 A wrong estimate can never change an answer. It can only leave the reservation off its step, and `compact` then rebuilds — which is the same cost the over-allocation would have paid. The estimate therefore has to make that rebuild *rare*, not impossible; §2.5 gives the bound.
 

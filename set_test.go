@@ -757,6 +757,68 @@ func TestEstimatedSizingStillDeliversOnStep(t *testing.T) {
 	}
 }
 
+// differenceReservation is what Difference reserves before the pass. It must be
+// tight when the smaller operand is large enough to probe, and the upper bound
+// below the floor, where the probe costs more than the sizing it saves.
+func TestDifferenceReservationTracksResult(t *testing.T) {
+	const m = 1_000_000
+	s := NewFromSlices(makeSeq(m))
+
+	cases := []struct {
+		name   string
+		other  *Set[int]
+		result int
+		tight  bool // the reservation must be far below the receiver's length
+	}{
+		{"tiny result from a large other", NewFromSlices(makeSeq(m - 1)), 1, true},
+		{"half the receiver", NewFromSlices(makeSeq(m / 2)), m / 2, true},
+		{"disjoint small other", NewFromSlices(disjointSeq(m / 100)), m, false},
+		{"below the sampling floor", NewFromSlices(makeSeq(2)), m - 2, false},
+	}
+	for _, c := range cases {
+		got := differenceReservation(s, c.other)
+		if !c.tight {
+			if got != m {
+				t.Fatalf("%s: reservation = %d, want the upper bound %d", c.name, got, m)
+			}
+			continue
+		}
+		// The estimate may overshoot within a step, but it must not reserve the
+		// whole receiver: that is the cost this path exists to avoid.
+		if theoreticalSlots(got) >= theoreticalSlots(m) {
+			t.Fatalf("%s: reservation = %d keeps the receiver's step (%d), want tighter",
+				c.name, got, theoreticalSlots(m))
+		}
+		if got < c.result/2 {
+			t.Fatalf("%s: reservation = %d is far below the result %d", c.name, got, c.result)
+		}
+	}
+}
+
+// The estimate only picks the reservation: whatever it says, the result must
+// hold exactly s − other, sit on the step of its own length, and leave both
+// operands untouched.
+func TestDifferenceProbeDeliversExactResult(t *testing.T) {
+	const m = 200_000
+	cases := []struct{ n int }{{1}, {m / 4}, {m / 2}, {m - 1}, {m}}
+	for _, c := range cases {
+		s, other := NewFromSlices(makeSeq(m)), NewFromSlices(makeSeq(c.n))
+		sBefore, otherBefore := s.Len(), other.Len()
+
+		res := s.Difference(other)
+		if res.Len() != m-c.n {
+			t.Fatalf("n=%d: Len() = %d, want %d", c.n, res.Len(), m-c.n)
+		}
+		if hintOversized(res.capacity, res.Len()) {
+			t.Fatalf("n=%d: capacity = %d reserves above the step for Len = %d", c.n, res.capacity, res.Len())
+		}
+		assertMatches(t, res, modelOf(seqFrom(c.n, m)...))
+		if s.Len() != sBefore || other.Len() != otherBefore {
+			t.Fatalf("n=%d: operands mutated", c.n)
+		}
+	}
+}
+
 // Retain adopts the step its surviving elements need, not the one the receiver
 // held before dropping them.
 func TestRetainCompactsToResultStep(t *testing.T) {

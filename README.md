@@ -74,9 +74,9 @@ for every hint up to 300,000.
 - **Results are sized exactly.** Operations that return a new set
   (`Difference`, `Intersection`, `Extend`, `Copy`) deliver a map whose
   reservation sits in the capacity step of their final length — never a step
-  above — so no rebuild is needed after the fact. The two that cannot know their
-  result in advance estimate it from a probe of the operands and compact the
-  delivery; the estimate decides how much work is done, never what the set
+  above — so no rebuild is needed after the fact. The three that cannot know
+  their result in advance estimate it from a probe of the operands and compact
+  the delivery; the estimate decides how much work is done, never what the set
   contains.
 - **No rebuild loops.** The trigger rules are threshold *crossings*, not zones,
   so each capacity step is rebuilt at most once per monotone descent.
@@ -214,22 +214,22 @@ amortised cost per deletion is `O(1)` with a small constant.
 
 The three binary set operations are worth calling out because they are where a
 naive implementation pays twice. Each of them has an unknown result to size a map
-for, and each resolves it differently: `Extend` and `Intersection` probe a few
-hundred elements of their operands to estimate how much will survive before
-reserving, while `Difference` reserves for the receiver's length and lets the
-compaction take back whatever did not survive. All three deliver a set already on
-the step of its final length, so none of them needs a rebuild afterwards. The
-probe's sample size and its error are derived in "Why the probe samples 256
-elements" below; the rehash rules themselves in `docs/set-rehash-en.md`.
+for, and each resolves it by probing a few hundred elements of an operand to
+estimate how much will survive before reserving: `Extend` probes its arguments,
+`Intersection` the smallest operand, and `Difference` the smaller of the two —
+probing the operand estimates the intersection, so what is left of the receiver
+is the result. All three deliver a set already on the step of its final length,
+so none of them needs a rebuild afterwards. The probe's sample size and its error
+are derived in "Why the probe samples 256 elements" below; the rehash rules
+themselves in `docs/set-rehash-en.md`.
 
-Reserving for the receiver is `Difference`'s cost: a small result out of a large
-receiver still allocates, and touches, a map of the receiver's size for the
-duration of the call. The trade is deliberate — the alternative, counting the
-common elements first, costs a second full pass over the smaller operand to buy a
-reservation that `make` rounds to the same step in the common case. `Difference`
-also keeps the cheap path for the case where no step can be crossed: when the
-subtraction provably cannot drop the result far enough, it copies and deletes
-instead of walking the misses into a fresh map.
+Below `samplingFloor` the probe would cost more than the sizing it saves, so
+`Difference` falls back to reserving the receiver's length; there it does not pay
+for a second pass over the smaller operand to buy a closer reservation, because
+`make` rounds both to the same step in the common case. It also keeps the cheap
+path for the case where no step can be crossed: when the subtraction provably
+cannot drop the result far enough, it copies and deletes instead of walking the
+misses into a fresh map.
 
 ## Performance
 
@@ -243,7 +243,7 @@ indicative; benchmark on your own workload.
 | `Contains` | one map lookup, no allocation |
 | `IsSubset` / `Disjoint` | no allocation |
 | `GetAll` | one allocation (the result slice) |
-| `Difference` | peak allocation proportional to the **receiver's length**, not to the result: the result map is reserved for the receiver and compacted below, so a tiny result out of a huge source still allocates (and briefly touches) a map of the source's size. The delivered set is left on the step of its own length. |
+| `Difference` | one pass, with the result map sized from a probe of the smaller operand (the upper bound only below `samplingFloor`): a tiny result out of a huge receiver no longer allocates a map of the receiver's size |
 
 Hot loops range directly over the internal map rather than going through
 iterators, and results are pre-sized, so the common paths do not allocate beyond

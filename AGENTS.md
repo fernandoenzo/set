@@ -77,7 +77,7 @@ There is no Makefile, no CI configuration and no lint or coverage target. The su
 | File | Role |
 |---|---|
 | `set.go` | The entire package: `Set[T]`, `New`, `NewFromSlices`, every method, `Union`, `Intersection`, `sampleCount`, `theoreticalSlots`, `needsRehash`, `hintOversized` |
-| `set_test.go` | The behavioural suite: 25 tests, exhaustive algebra against a model |
+| `set_test.go` | The behavioural suite: 27 tests, exhaustive algebra against a model |
 | `bench_test.go` | The benchmarks behind the README's Performance table (`go test -bench .`) |
 | `LICENSE` | GPLv3 full text (byte-identical to `nvfp/LICENSE`) |
 | `go.mod` | Module path and Go version (`go 1.27.1`); no dependencies, so no `go.sum` |
@@ -103,13 +103,14 @@ There is no Makefile, no CI configuration and no lint or coverage target. The su
 
 ## Testing & QA
 
-- Run everything: `go test ./...` (25 tests, sub-second) and `go test -race ./...`.
+- Run everything: `go test ./...` (27 tests, sub-second) and `go test -race ./...`.
 - Benchmarks live in `bench_test.go` and cover every row of the README's Performance table; run them with `go test -bench . -benchmem`. They use `b.Loop()` except the three mutating ones (`Remove`, `Rehash`, `Extend`), which need `StopTimer`/`StartTimer` around their setup and therefore the classic `b.N` form — `b.Loop` panics if called with the timer stopped. If a row of the table changes, the matching benchmark must change with it: the table must stay reproducible from `go test -bench .` alone.
 - The suite runs against a reference model, not mocks: `map[int]struct{}` for membership and `slices`/`maps` for the algebra.
-- Coverage is contractual, not structural. The fixed contracts are: every writer and reader against the zero value (`TestZeroValueWriters`, `TestZeroValueReaders`, `TestZeroValueSetAsArgument`), the full algebra against the model (`TestSetAlgebraMatchesModel`, `TestMutatorsMatchModel`), the `Copy`/`Clone` reservation contracts (`TestCopyAndCloneContracts`), `Rehash` landing on the smallest step (`TestRehashCompactsToSmallestStep`), `Difference` delivering an exactly-sized result (`TestDifferenceNeverOverAllocated`, `TestDifferenceDisjointKeepsStep`), self-operations (`TestSelfOperations`), and the estimator still delivering on a step (`TestEstimatedSizingStillDeliversOnStep`).
+- Coverage is contractual, not structural. The fixed contracts are: every writer and reader against the zero value (`TestZeroValueWriters`, `TestZeroValueReaders`, `TestZeroValueSetAsArgument`), the full algebra against the model (`TestSetAlgebraMatchesModel`, `TestMutatorsMatchModel`), the `Copy`/`Clone` reservation contracts (`TestCopyAndCloneContracts`), `Rehash` landing on the smallest step (`TestRehashCompactsToSmallestStep`), `Difference` delivering an exactly-sized result (`TestDifferenceNeverOverAllocated`, `TestDifferenceDisjointKeepsStep`), self-operations (`TestSelfOperations`), the estimator still delivering on a step (`TestEstimatedSizingStillDeliversOnStep`), and the probe that sizes `Difference` (`TestDifferenceReservationTracksResult`, `TestDifferenceProbeDeliversExactResult`).
 - Tests may read unexported state (`s.capacity`) where the contract *is* the reservation; that is deliberate and is what pins the model to the behaviour.
 - `TestTheoreticalSlotsIsNonDecreasing` and `TestTheoreticalSlotsAtMostDoublesPerStep` pin the sizing model itself up to 2,000,000, with the stated rationale that `needsRehash`'s threshold rule stops being valid if they fail.
 - Adding a public operation means: a model comparison for its semantics, plus a reservation assertion if it returns or leaves a set whose size is knowable.
+- **A probe's estimate is a reservation, never an answer.** `differenceReservation` and the other `sampleCount` callers may be wrong about size; the tests pin that the *contents* stay exact and the *delivered* set lands on its own step. When changing a probe, mutate the estimate (return the upper bound, or a fraction of it) and confirm the test fails — that is what proves the test covers the branch.
 - `TestSingleAddNeverReserves` guarantees that a single `Add` never rebuilds, which is what makes the amortised cost claim in the README hold.
 
 ## License
