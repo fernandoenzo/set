@@ -123,36 +123,16 @@ Una estimación equivocada no puede cambiar una respuesta. Solo puede dejar la r
 
 ### 2.5. `sampleCount` — cuántos sondeos, y por qué 256
 
-La estimación es la proporción muestral extrapolada:
+El sondeo extrae $n$ elementos sin reemplazo de una población de $N$ y extrapola
+el número de aciertos. El estimador es insesgado, su error lo gobierna la
+hipergeométrica, y el tamaño de muestra sale de la fórmula de poblaciones finitas
+de Cochran con la tolerancia impuesta por la estructura de escalones, no elegida.
 
-$$\hat{k}\ =\ n\cdot\frac{c}{s},\qquad s=\texttt{overlapSample},\quad c=\text{aciertos entre los primeros } s \text{ elementos}.$$
-
-**Es insesgada.** Go aleatoriza el orden de iteración del mapa, así que los primeros $s$ elementos recorridos son una muestra uniforme sin reemplazo y $\mathbb{E}[\hat{k}]=k$. Ningún argumento de corrección depende de esto —`compact` arregla cualquier estimación—, pero es lo que hace que un $s$ pequeño baste.
-
-**Su error es un error típico binomial.** El coeficiente de variación de $\hat{k}$ es
-
-$$\mathrm{CV}\ =\ \sqrt{\frac{1-p}{p\,s}},\qquad p=\frac{k}{n},$$
-
-que **alcanza su máximo en $p=1/2$ y disminuye según crece el solape**. Con $s=256$:
-
-| solape $p$ | CV | error $2\sigma$ |
-|---|---|---|
-| $1\%$ | $62\%$ | $124\%$ |
-| $10\%$ | $19\%$ | $37\%$ |
-| $50\%$ | $6{,}3\%$ | $12{,}5\%$ |
-| $100\%$ | $0$ | $0$ |
-
-Las filas de solape bajo son las que parecen alarmantes y son justamente las inofensivas: lo que importa no es el error relativo de $p$ sino **dónde cae la estimación respecto al escalón $T(n)$**. Escribiendo la estimación como $n\theta$ y el valor verdadero como $n p$, se reconstruye cuando $T(n\theta)\ne T(np)$. Como el escalón es una potencia de dos, eso exige que $n\theta$ quede fuera del mismo escalón que $np$, y para todo $p$ por debajo de $1/4$ aproximadamente eso ya es gratis: tanto las estimaciones como el valor verdadero caen *por debajo* del menor escalón en que puede aterrizar un mapa de $n$ claves, así que los tres se compactan al mismo sitio. El sondeo solo tiene que ser fino en la banda donde el resultado cae dentro del escalón, y allí $p\ge1/4$, luego $\mathrm{CV}\le\sqrt{3/s}$.
-
-Igualando ese error $2\sigma$ del peor caso a la anchura de un escalón sale la regla de diseño. Un escalón abarca un factor $2$ en longitud, y la estimación solo tiene que quedarse dentro de un factor $2^{1/2}$ de la verdad para no cambiar de escalón, es decir un error relativo por debajo del $41\%$:
-
-$$2\sqrt{\frac{3}{s}}\ \le\ 0{,}41\quad\Longrightarrow\quad s\ \ge\ \frac{4\cdot3}{0{,}41^2}\approx 71.$$
-
-$256$ es esa cota con un factor $3{,}6$ de margen, y es deliberado: la cola de la binomial alrededor de $1/2$ es muy parecida a la normal, así que $2\sigma$ no es una garantía dura, y el margen extra no cuesta nada. El sondeo son $s$ consultas al mapa frente a una pasada de $n$ — en la escala de $10^6$, donde la estimación empieza a importar, $256$ consultas son el $0{,}026\%$ del trabajo que están dimensionando.
-
-**Los conjuntos pequeños se autoexcluyen.** `samplingFloor` es `overlapSample * 16 = 4096`. El sondeo compensa en proporción a cuánto evita de una reserva equivocada: con $s=256$ y $n=4096$ añade como mucho un $6\%$ a la pasada, y por debajo de eso crece como $1/n$ mientras el error que evita encoge como $n$. El cruce medido está alrededor de $n=10^3$, donde el sondeo cuesta más de lo que ahorra.
-
-**`Intersection` es más estricta que `Extend` por la misma razón.** No tiene una pasada de conteo que el sondeo venga a sustituir —ahí el sondeo es adición pura—, así que su umbral tiene que cubrir el coste entero de una reserva equivocada, no una fracción. El caso disjunto lo ilustra: $p=0$ significa que no sobrevive nada, toda reserva es equivocada sea cual sea su tamaño, y la reconstrucción es inevitable; el sondeo es sobrecoste puro y ambos cuestan lo mismo con $s=256$ que con $s=0$. Lo que el sondeo compra son los casos $p\in(0,1)$, que es exactamente la banda donde su error está acotado.
+La deducción completa —la parametrización $H(N,n,p)$, el factor corrector de
+población finita, el paso a la binomial y a la normal, la cota $n\ge71{,}38$ y
+por qué se redondea a 256— está en el README, sección *Why the probe samples 256
+elements*. Se mantiene allí y no aquí porque pertenece al comportamiento de la
+API, no a las reglas de reconstrucción que este documento deduce.
 
 ---
 

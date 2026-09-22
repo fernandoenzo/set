@@ -198,8 +198,9 @@ for, and each resolves it differently: `Difference` reserves the upper bound and
 lets the compaction take back the difference, while `Extend` and `Intersection`
 probe a few hundred elements of their operands to estimate how much will survive
 before reserving. All three deliver a set already on the step of its final
-length, so none of them needs a rebuild afterwards. `docs/set-rehash-en.md` §2.4
-and §2.5 derive the choice and bound the probe's error.
+length, so none of them needs a rebuild afterwards. The probe's sample size and
+its error are derived in "Why the probe samples 256 elements" below; the rehash
+rules themselves in `docs/set-rehash-en.md`.
 
 `Difference` also keeps the cheap path for the case where no step can be crossed:
 when the subtraction provably cannot drop the result far enough, it copies and
@@ -223,6 +224,153 @@ Hot loops range directly over the internal map rather than going through
 iterators, and results are pre-sized, so the common paths do not allocate beyond
 the container itself. `go test -bench .` in the repository reports the numbers
 for the current machine.
+
+## Why the probe samples 256 elements
+
+`Extend` and `Intersection` must reserve a map for a result whose size they
+cannot know: how many of an operand's elements are new, or survive the
+intersection, depends on an overlap that is only visible once the pass is made.
+Undersizing costs a runtime rehash; sizing for the whole operand over-allocates
+by up to two capacity steps and pays the same rehash. So they estimate the
+result from a sample of the operand — `sampleCount` — and size the map from the
+estimate.
+
+The estimate is the sample proportion scaled up:
+
+$$\hat{k}\ =\ N\cdot\frac{C}{s},\qquad s=\texttt{overlapSample}=256$$
+
+### The sampling distribution is hypergeometric
+
+The $s$ probed elements are drawn **without replacement** from a finite
+population of $N$: iterating a map visits each element once, so the probe is a
+sample without replacement by construction. That is a hypergeometric experiment,
+and it is what governs the estimate's error.
+
+In the parametrisation $H(N,n,p)$ — total population, sample size, and the
+proportion belonging to the subpopulation of interest:
+
+| Parameter | Value in `sampleCount` |
+|---|---|
+| $N$ | population: `small.Len()`, the set being probed |
+| $n$ | sample size: `overlapSample` = 256 |
+| $p$ | proportion of $N$ satisfying the predicate |
+
+The population splits into two exclusive subpopulations: elements satisfying the
+predicate (`Intersection`: present in every other set; `Extend`: new to `s` and
+to the arguments already folded) and those that do not. Since $p=k/N$ for an
+integer count $k$, $Np$ is always an integer and the parametrisations
+$H(N,K,n)$ and $H(N,n,p)$ coincide.
+
+> **Notation.** This section uses $N$ for the population, $n$ for the sample and
+> $p$ for the proportion. Elsewhere the *size of a set* is written `Len()`.
+
+For $C\sim H(N,n,p)$:
+
+$$\mathbb{E}[C]=np,\qquad
+\mathrm{Var}[C]=np(1-p)\,\frac{N-n}{N-1}$$
+
+so $\hat k=NC/n$ is unbiased with coefficient of variation
+
+$$\mathrm{CV}[\hat{k}]
+=\underbrace{\sqrt{\frac{1-p}{p\,n}}}_{\text{proportion's error}}\;\cdot\;
+\underbrace{\sqrt{\frac{N-n}{N-1}}}_{\text{finite population correction}}$$
+
+### From hypergeometric to binomial to normal
+
+The finite population correction is the only thing separating the hypergeometric
+from the binomial. In the regime `sampleCount` runs — $n=256$ against
+$N\ge4096$, the floor below — the correction is at worst $0{,}968$, i.e. $6\%$
+low in variance and so $3\%$ low in standard error. Dropping it therefore
+*overstates* the error, which is the safe direction: $\mathrm{Bin}(n,p)$ is
+indistinguishable from $H(N,n,p)$ there, and the standard error is taken as
+$\sqrt{p(1-p)/n}$.
+
+The binomial is then approximated by the normal, which is what makes the bound a
+one-line calculation once $Z=2$ is fixed. That approximation has a known edge:
+it underestimates far tails, which is exactly where $p$ sits near the ends of
+the interval. It is acceptable here because those are the cases where the
+estimate does not need to be good — at $p\to0$ and $p\to1$ the rounding to a
+capacity step is exact whatever the sample says. For $p=1/2$, where the
+criterion binds, the binomial is at its closest to normal.
+
+The left factor peaks at $p=1/2$ and falls as the overlap grows:
+
+| $p$ | CV | $2\sigma$ |
+|---|---|---|
+| $1\%$ | $62\%$ | $124\%$ |
+| $10\%$ | $19\%$ | $37\%$ |
+| $50\%$ | $6{,}3\%$ | $12{,}5\%$ |
+| $100\%$ | $0$ | $0$ |
+
+The alarming-looking small-$p$ rows are in fact harmless, and the reason is that
+**the relevant quantity is not the error in $p$ but where the estimate lands
+relative to the capacity step $T(N)$**. Writing the estimate as $N\theta$ and the
+truth as $Np$, a rebuild happens when $T(N\theta)\neq T(Np)$. Since the step is a
+power of two, that needs $N\theta$ to leave the step of $Np$; for any $p$ below
+roughly $1/4$ both the estimate and the truth already sit *below* the smallest
+step a map of $N$ keys can land on, so all of them round to the same place. The
+probe only needs accuracy in the band where the outcome sits inside the step, and
+there $p\ge1/4$, hence
+
+$$\mathrm{CV}\le\sqrt{\frac{1-p}{p\,n}}\Big|_{p=1/4}=\sqrt{\frac{3}{n}}$$
+
+### Where 256 comes from: Cochran's formula
+
+The finite-population sample size formula (Cochran, *Sampling Techniques*, 1977,
+eq. 5.10) is
+
+$$n\ =\ \frac{n_0}{1+\dfrac{n_0-1}{N}},
+\qquad n_0=\frac{Z^2\,p(1-p)}{e^2}$$
+
+and its correction factor $1/(1+(n_0-1)/N)$ **is** the finite population
+correction derived above from the hypergeometric variance: the same quantity
+reached from two directions. Two of the three inputs are fixed by the problem
+rather than chosen by the analyst:
+
+- **$Z=2$**, as a "rare, not impossible" criterion. This is *not* a confidence
+  level. A wrong estimate is corrected by `compact()` with a rebuild — a cost,
+  never a wrong answer — so the sample must make that rebuild rare, not bound it
+  in probability.
+- **$e=41\%$**, imposed by the data structure: to land on the same step the
+  estimate must stay within a factor of $2^{1/2}$ of the truth, i.e. a relative
+  error under $\sqrt2-1\approx41\%$.
+- **$p=1/4$**, the worst case in the band that matters, as derived above.
+
+$$e=0{,}41p=0{,}1025,\qquad
+n=\frac{Z^2p(1-p)}{e^2}=\frac{4\cdot0{,}1875}{0{,}1025^2}=71{,}38$$
+
+`overlapSample` is **256**, that bound with a factor of $3.6$ of margin. The
+margin is deliberate: the hypergeometric tail near $p=1/2$ is only approximately
+normal, and $2\sigma$ is a criterion rather than a guarantee. The cost is
+negligible — 256 lookups against a pass of $N$; at $N=10^6$ that is $0.026\%$ of
+the work being sized.
+
+### Why small sets opt out
+
+`samplingFloor` is `overlapSample * 16 = 4096`. The probe pays for itself in
+proportion to what it avoids: with $n=256$ and $N=4096$ it adds at most $6\%$ to
+the pass, and below that it grows as $1/N$ while the mistake it prevents shrinks
+as $N$. The measured crossover is near $N=10^3$, where the probe costs more than
+the sizing it saves.
+
+Below the floor the finite population correction stops being negligible in the
+other direction too — at $N$ approaching $n$ it would tighten the bound rather
+than loosen it — so the floor is also what keeps the binomial substitution
+harmless.
+
+`Intersection` uses the same floor although it could afford a smaller one, but
+for a different reason it cannot: it has no counting pass for the probe to
+replace, so the probe is pure addition there and its threshold must clear the
+whole cost of a wrong reservation rather than a fraction of it.
+
+### A caveat on exactness
+
+Go does not hand out a uniformly random subset of size $n$: it picks a random
+bucket and offset and walks deterministically from there. The start point is
+uniform, the subset is not, so the hypergeometric describes the probe well but
+not as a formal identity. Nothing in the design depends on exactness — the
+bound needs the estimator to be approximately unbiased, and `compact()` corrects
+any deviation — but the distribution should not be read as a guarantee.
 
 ## Verifying the design
 
