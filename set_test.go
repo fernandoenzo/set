@@ -832,6 +832,140 @@ func TestRetainCompactsToResultStep(t *testing.T) {
 	}
 }
 
+// NewFromSlices reserves for the total length of its input; when duplicates
+// leave the distinct count a whole step below that, the hint is spent and the
+// map must be compacted. A hint whose reservation lands on a crack (where the
+// usable budget the runtime gets is smaller than the hint) is exactly the case
+// the compaction exists for.
+func TestNewFromSlicesCompactsOversizedHint(t *testing.T) {
+	// total=16 reserves a 32-slot map; 8 distinct values land on 8.
+	total, distinct := 16, 8
+	if !hintOversized(total, distinct) {
+		t.Fatalf("case (%d,%d) is not oversized: the test no longer covers the branch", total, distinct)
+	}
+	vals := makeSeq(distinct)
+	for i := range total - distinct {
+		vals = append(vals, i%distinct) // duplicates
+	}
+
+	s := NewFromSlices(vals)
+	if s.Len() != distinct {
+		t.Fatalf("Len() = %d, want %d", s.Len(), distinct)
+	}
+	if hintOversized(s.capacity, s.Len()) {
+		t.Fatalf("capacity = %d still reserves above the step for Len = %d", s.capacity, s.Len())
+	}
+	assertMatches(t, s, modelOf(makeSeq(distinct)...))
+}
+
+// The same compaction inside AddAll: a batch that triggers a resize but whose
+// distinct count then falls a step below the reservation it asked for.
+func TestAddAllCompactsAfterResize(t *testing.T) {
+	// A receiver holding 1 element (1000, outside the batch), then 16 values of
+	// which 4 are duplicates: total = 17, distinct = 13.
+	s := NewFromSlices([]int{1000})
+	batch := makeSeq(12)
+	for i := range 4 {
+		batch = append(batch, i)
+	}
+	if len(batch) != 16 {
+		t.Fatalf("batch has %d values, want 16", len(batch))
+	}
+	if !hintOversized(s.Len()+len(batch), 13) {
+		t.Fatalf("case is not oversized: the test no longer covers the branch")
+	}
+
+	s.AddAll(batch...)
+	if s.Len() != 13 { // 1000 plus the 12 distinct batch values
+		t.Fatalf("Len() = %d, want 13", s.Len())
+	}
+	if hintOversized(s.capacity, s.Len()) {
+		t.Fatalf("capacity = %d reserves above the step for Len = %d", s.capacity, s.Len())
+	}
+	want := modelOf(1000)
+	for _, v := range makeSeq(12) {
+		want[v] = struct{}{}
+	}
+	assertMatches(t, s, want)
+}
+
+// Extend's probe asks whether a probed element is new to the receiver; the
+// "already there" branch only runs when the receiver shares elements with a
+// probed argument large enough to reach the sampling floor.
+func TestExtendProbeSkipsExistingElements(t *testing.T) {
+	const n = 20000 // above samplingFloor
+	recv := NewFromSlices(makeSeq(n / 2))
+	other := NewFromSlices(makeSeq(n)) // half its elements are already in recv
+
+	if recv.Len()+other.Len() < samplingFloor {
+		t.Fatalf("operands do not reach the sampling floor")
+	}
+	recv.Extend(other)
+
+	if recv.Len() != n {
+		t.Fatalf("Len() = %d, want %d", recv.Len(), n)
+	}
+	if hintOversized(recv.capacity, recv.Len()) {
+		t.Fatalf("capacity = %d reserves above the step for Len = %d", recv.capacity, recv.Len())
+	}
+	assertMatches(t, recv, modelOf(makeSeq(n)...))
+}
+
+// Intersection's probe asks whether a probed element of the smallest operand is
+// present in every other one; the "absent" branch needs a smallest operand above
+// the floor that shares only part of its elements with a larger one.
+func TestIntersectionProbeSeesAbsentElements(t *testing.T) {
+	const n = 20000
+	// a and b share their first half; a's second half is absent from b, so the
+	// probe visits both the "present" and the "absent" branch.
+	a := NewFromSlices(makeSeq(n))
+	b := NewFromSlices(append(makeSeq(n/2), seqFrom(100000, 100000+n/2)...))
+
+	if min(a.Len(), b.Len()) < samplingFloor {
+		t.Fatalf("smallest operand does not reach the sampling floor")
+	}
+	got := Intersection(a, b)
+
+	if got.Len() != n/2 {
+		t.Fatalf("Len() = %d, want %d", got.Len(), n/2)
+	}
+	if hintOversized(got.capacity, got.Len()) {
+		t.Fatalf("capacity = %d reserves above the step for Len = %d", got.capacity, got.Len())
+	}
+	assertMatches(t, got, modelOf(makeSeq(n/2)...))
+}
+
+// sampleCount is documented to be exact — counting rather than scaling — when
+// the probed operand holds no more than overlapSample elements. Extend is the
+// only caller that can reach that path: the others guard their operand above
+// samplingFloor, but an argument here can be small while the total is large.
+func TestExtendProbesSmallArgumentExactly(t *testing.T) {
+	recv := NewFromSlices(makeSeq(6000))     // large receiver
+	arg := NewFromSlices(append(makeSeq(50), // 50 already present
+		seqFrom(100000, 100050)...)) // 50 new
+
+	if arg.Len() > overlapSample {
+		t.Fatalf("argument holds %d elements, want at most %d", arg.Len(), overlapSample)
+	}
+	if recv.Len()+arg.Len() < samplingFloor {
+		t.Fatalf("total does not reach the sampling floor, so no probe runs")
+	}
+
+	recv.Extend(arg)
+
+	if recv.Len() != 6050 {
+		t.Fatalf("Len() = %d, want 6050", recv.Len())
+	}
+	if hintOversized(recv.capacity, recv.Len()) {
+		t.Fatalf("capacity = %d reserves above the step for Len = %d", recv.capacity, recv.Len())
+	}
+	want := modelOf(makeSeq(6000)...)
+	for _, v := range seqFrom(100000, 100050) {
+		want[v] = struct{}{}
+	}
+	assertMatches(t, recv, want)
+}
+
 // extendOf is Union through Extend, the path the estimation covers.
 func extendOf(sets ...*Set[int]) *Set[int] {
 	return Union(sets...)
