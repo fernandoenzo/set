@@ -72,26 +72,29 @@ func BenchmarkGetAll(b *testing.B) {
 	}
 }
 
-// The mutating benchmarks need their setup excluded from the timing, so they
-// use the classic b.N form: b.Loop forbids StopTimer/StartTimer.
+// The three mutating benchmarks need their setup excluded from the measurement.
+// Loop resets the timer on its first call, so setup written before the loop is
+// already excluded; the per-iteration setup goes inside the body with the timer
+// stopped, leaving it running at the end — which Loop requires and StopTimer's
+// "timer stopped" guard enforces.
 
 func BenchmarkRemove(b *testing.B) {
 	e := benchSeq(benchSet / 2)
 	b.ReportAllocs()
-	for range b.N {
-		s := NewFromSlices(benchSeq(benchSet))
+	for b.Loop() {
 		b.StopTimer()
-		s.Remove(e...)
+		s := NewFromSlices(benchSeq(benchSet))
 		b.StartTimer()
+		s.Remove(e...)
 	}
 }
 
 func BenchmarkRehash(b *testing.B) {
-	for range b.N {
-		s := NewFromSlices(benchSeq(benchSet))
+	for b.Loop() {
 		b.StopTimer()
-		s.Rehash()
+		s := NewFromSlices(benchSeq(benchSet))
 		b.StartTimer()
+		s.Rehash()
 	}
 }
 
@@ -99,11 +102,11 @@ func BenchmarkExtend(b *testing.B) {
 	a := NewFromSlices(benchSeq(benchSet))
 	c := NewFromSlices(benchSeq(benchSet * 2))
 	b.ReportAllocs()
-	for range b.N {
-		d := a.Clone()
+	for b.Loop() {
 		b.StopTimer()
-		d.Extend(c)
+		d := a.Clone()
 		b.StartTimer()
+		d.Extend(c)
 	}
 }
 
