@@ -682,13 +682,18 @@ func TestAddMatchesAddAll(t *testing.T) {
 		}
 	}
 
-	for _, batch := range []int{2, 7, 64, 1000} {
-		inChunks := New[int](0)
-		for i := 0; i < n; i += batch {
-			inChunks.AddAll(all[i:min(i+batch, n)]...)
-		}
-		if !inChunks.Equal(oneAtATime) {
-			t.Fatalf("batch %d: chunked inserts disagree with one at a time", batch)
+	// batch 1 is the single-element path, which AddAll routes through Add; the
+	// other sizes go to the general path. Both must agree with adding one at a
+	// time, from the zero value and from a set whose map has already grown.
+	for _, batch := range []int{1, 2, 7, 64, 1000} {
+		for _, hint := range []int{0, 1} {
+			inChunks := New[int](hint)
+			for i := 0; i < n; i += batch {
+				inChunks.AddAll(all[i:min(i+batch, n)]...)
+			}
+			if !inChunks.Equal(oneAtATime) {
+				t.Fatalf("batch %d hint %d: chunked inserts disagree with one at a time", batch, hint)
+			}
 		}
 	}
 
