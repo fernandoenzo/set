@@ -483,5 +483,5 @@ func needsRehash(before, after int) bool {
 // actual <= hint landed below the step it reserved. See docs/set-rehash-en.md
 // §2.4.
 func hintOversized(hint, actual int) bool {
-	return theoreticalSlots(hint) != theoreticalSlots(actual)
+	return theoreticalSlots(hint) > theoreticalSlots(actual)
 }

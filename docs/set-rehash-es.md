@@ -91,10 +91,10 @@ Las dos últimas líneas son el corazón del diseño y se leen igual: **dispara 
 ### 2.4. `hintOversized(hint, actual)` — la regla para mapas recién creados
 
 ```
-hintOversized(hint, actual)  ⟺  T(hint) ≠ T(actual)
+hintOversized(hint, actual)  ⟺  T(hint) > T(actual)
 ```
 
-Solo se usa al construir un `Set` nuevo (`NewFromSlices`, `AddAll`, `Extend`, `Difference`, `Intersection`): si se reservó para `hint` elementos pero quedaron bastantes menos, cruzó un escalón entero de memoria y se compacta. Un mapa recién creado con carga $\le 7/8$ ya está en su tamaño natural; razonarlo más sería volver a tirar los mismos dados con el mismo coste y sin esperanza de mejora.
+Solo se usa al construir un `Set` nuevo (`NewFromSlices`, `AddAll`, `Extend`, `Difference`, `Intersection`): si se reservó para `hint` elementos pero quedaron bastantes menos, cruzó un escalón entero de memoria y se compacta. La comparación es estricta y direccional: un mapa que creció por encima de su `hint` (`actual > hint`) está infrarreservado, no sobrerreservado, y se deja intacto. Un mapa recién creado con carga $\le 7/8$ ya está en su tamaño natural; razonarlo más sería volver a tirar los mismos dados con el mismo coste y sin esperanza de mejora.
 
 Las tres operaciones binarias se diferencian en cómo eligen `hint`, porque cada una sabe algo distinto sobre su resultado.
 

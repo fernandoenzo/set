@@ -91,10 +91,10 @@ The last two lines are the heart of the design and read identically: **fire only
 ### 2.4. `hintOversized(hint, actual)` — the rule for freshly built maps
 
 ```
-hintOversized(hint, actual)  ⟺  T(hint) ≠ T(actual)
+hintOversized(hint, actual)  ⟺  T(hint) > T(actual)
 ```
 
-Used only when building a new `Set` (`NewFromSlices`, `AddAll`, `Extend`, `Difference`, `Intersection`): if space was reserved for `hint` elements but far fewer remain, a whole memory step was crossed downward and the map is compacted. A freshly built map at load $\le 7/8$ is already at its natural size; reasoning further would just re-roll the same dice at the same cost with no expected gain.
+Used only when building a new `Set` (`NewFromSlices`, `AddAll`, `Extend`, `Difference`, `Intersection`): if space was reserved for `hint` elements but far fewer remain, a whole memory step was crossed downward and the map is compacted. The comparison is strict and directional: a map that outgrew its hint (`actual > hint`) is under-reserved, not oversized, and is left alone. A freshly built map at load $\le 7/8$ is already at its natural size; reasoning further would just re-roll the same dice at the same cost with no expected gain.
 
 The three binary operations differ in how they choose `hint`, because each one knows something different about its result.
 
