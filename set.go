@@ -177,19 +177,6 @@ func (s *Set[T]) Retain(sets ...*Set[T]) {
 
 // Difference returns s − other with the result on the step of its own length.
 func (s *Set[T]) Difference(other *Set[T]) *Set[T] {
-	m, n := s.Len(), other.Len()
-	overlap := min(m, n)
-
-	// Even removing every element of the smaller set leaves the result in the
-	// same step, so copying and subtracting is the cheapest path: deletes cost
-	// less than membership probes and no rebuild is needed for size. Subtract
-	// still compacts if the result falls below the X threshold.
-	if !hintOversized(m, m-overlap) {
-		res := s.Copy()
-		res.Subtract(other)
-		return res
-	}
-
 	// The result may land a step lower. One pass over s keeping the misses,
 	// reserved from a probe of the smaller operand and compacted below. See
 	// README, "Why the probe samples 256 elements".
@@ -203,16 +190,16 @@ func (s *Set[T]) Difference(other *Set[T]) *Set[T] {
 	return res
 }
 
-// differenceReservation returns the hint to reserve for s − other: a probe of
-// the smaller operand above the sampling floor, the receiver's length below
-// it. A wrong estimate only moves the reservation; compact corrects it.
+// differenceReservation returns the hint to reserve for s − other: the
+// receiver's length when no step can be crossed even removing everything the
+// other operand could hold, a probe of the smaller operand otherwise. A wrong
+// estimate only moves the reservation; compact corrects it.
 func differenceReservation[T comparable](s, other *Set[T]) int {
-	m, n := s.Len(), other.Len()
-	if min(m, n) < samplingFloor {
-		return m
-	}
-	if n < m {
-		return m - sampleCount(other, s.Contains)
+	if maxDifference := s.Len() - other.Len(); maxDifference > 0 {
+		if !hintOversized(s.Len(), maxDifference) {
+			return s.Len()
+		}
+		return s.Len() - sampleCount(other, s.Contains)
 	}
 	return sampleCount(s, func(v T) bool { return !other.Contains(v) })
 }
@@ -457,12 +444,11 @@ func pow2ceil(v int) int {
 // threshold crossings, so each step is rebuilt at most once. See
 // docs/set-rehash-en.md §2.4 and §9.
 func needsRehash(before, after int) bool {
-	before, after = max(before, after), min(before, after)
-	if before == after {
+	if before <= after {
 		return false
 	}
 	t1, t2 := theoreticalSlots(before), theoreticalSlots(after)
-	if t1 != t2 {
+	if t2 < t1 {
 		return true
 	}
 	if before <= 8 {
