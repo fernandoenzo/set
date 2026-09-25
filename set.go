@@ -52,6 +52,13 @@ func (s *Set[T]) estimatedSlotsLeft() int {
 	return theoreticalSlots(max(s.Len(), s.capacity)) - s.Len()
 }
 
+// needsFreshMap reports whether a batch of addLen insertions into s should
+// land in a fresh map sized at target. See docs/set-rehash-en.md §2.3.
+func (s *Set[T]) needsFreshMap(target, addLen int) bool {
+	left := s.estimatedSlotsLeft()
+	return left < addLen && 2*(left+s.Len()) < theoreticalSlots(target)
+}
+
 // NewFromSlices returns the set of the distinct elements of all lists.
 func NewFromSlices[T comparable](lists ...[]T) *Set[T] {
 	total := 0
@@ -88,12 +95,8 @@ func (s *Set[T]) AddAll(e ...T) {
 		return
 	}
 	s.ensure(len(e))
-	makeNew := false
-	var total int
-	if left := s.estimatedSlotsLeft(); left < len(e) {
-		total = s.Len() + len(e)
-		makeNew = 2*(left+s.Len()) < theoreticalSlots(total)
-	}
+	total := s.Len() + len(e)
+	makeNew := s.needsFreshMap(total, len(e))
 	if makeNew {
 		s.resize(total)
 	}
@@ -126,7 +129,7 @@ func (s *Set[T]) Extend(sets ...*Set[T]) {
 	// rather than for the sum of the operands. See README, "Why the probe
 	// samples 256 elements".
 	target := s.Len() + extLen
-	if target >= samplingFloor {
+	if s.needsFreshMap(target, extLen) {
 		order := make([]*Set[T], len(sets))
 		copy(order, sets)
 		slices.SortFunc(order, func(x, y *Set[T]) int { return y.Len() - x.Len() })
@@ -151,7 +154,7 @@ func (s *Set[T]) Extend(sets ...*Set[T]) {
 	}
 
 	s.ensure(target)
-	if left := s.estimatedSlotsLeft(); left < extLen && 2*(left+s.Len()) < theoreticalSlots(target) {
+	if s.needsFreshMap(target, target-s.Len()) {
 		s.resize(target)
 	}
 	for _, other := range sets {
@@ -200,14 +203,9 @@ func (s *Set[T]) Difference(other *Set[T]) *Set[T] {
 	return res
 }
 
-// differenceReservation returns the hint to reserve for s − other. Above the
-// sampling floor it estimates the result from a probe of the smaller operand,
-// the way Intersection sizes itself: probing other estimates the intersection,
-// so what is left of s is the result, and probing s counts the misses directly.
-// Below the floor, where the probe costs more than the sizing it saves, it falls
-// back to the upper bound. A wrong estimate only moves the reservation —
-// compact corrects it — so this decides how much work is done, never what the
-// set contains.
+// differenceReservation returns the hint to reserve for s − other: a probe of
+// the smaller operand above the sampling floor, the receiver's length below
+// it. A wrong estimate only moves the reservation; compact corrects it.
 func differenceReservation[T comparable](s, other *Set[T]) int {
 	m, n := s.Len(), other.Len()
 	if min(m, n) < samplingFloor {
@@ -405,9 +403,8 @@ const overlapSample = 256
 // README, same section.
 const samplingFloor = overlapSample * 16
 
-// sampleCount returns how many elements of small satisfy keep. Up to
-// overlapSample elements are counted, which makes the answer exact; beyond that
-// a probe of the first overlapSample is scaled up.
+// sampleCount returns how many elements of small satisfy keep: exact up to
+// overlapSample, estimated beyond it.
 func sampleCount[T comparable](small *Set[T], keep func(T) bool) int {
 	n := small.Len()
 	if n <= overlapSample {
@@ -458,7 +455,7 @@ func pow2ceil(v int) int {
 // needsRehash reports whether a map with history that fell from before to after
 // elements is over-allocated enough to be worth rebuilding. It fires only on
 // threshold crossings, so each step is rebuilt at most once. See
-// docs/set-rehash-en.md §2.3 and §9.
+// docs/set-rehash-en.md §2.4 and §9.
 func needsRehash(before, after int) bool {
 	before, after = max(before, after), min(before, after)
 	if before == after {
@@ -481,7 +478,7 @@ func needsRehash(before, after int) bool {
 
 // hintOversized reports whether a map built with make(hint) and filled to
 // actual <= hint landed below the step it reserved. See docs/set-rehash-en.md
-// §2.4.
+// §2.5.
 func hintOversized(hint, actual int) bool {
 	return theoreticalSlots(hint) > theoreticalSlots(actual)
 }

@@ -17,7 +17,8 @@ zero value ──► first write ──► ensure ──► resize(hint) ──�
      insert path                          │            delete path
 Add / AddAll / AddSeq / Extend ───────────┤
   estimatedSlotsLeft() covers the batch?  │  Remove / Subtract:
-  no resize, else resize + compact        │  delete + needsRehash(before, after)
+  no resize, else needsFreshMap → resize  │  delete + needsRehash(before, after)
+  + compact
                                           ▼
                              Rehash() = resize(Len())
                              compact() = Rehash when hintOversized(capacity, Len())
@@ -60,8 +61,7 @@ There is no Makefile, no CI configuration and no lint or coverage target. The su
 
 ## Code Conventions & Common Patterns
 
-- **Function length**: Max 25 lines of code per function (comments excluded). Extract helpers early. Two known exceptions: `Intersection` (53) and `Extend` (37). Do not grow that list.
-- **Comments carry the derivation, not the mechanics**: every non-obvious decision points at `docs/set-rehash-en.md §N` or at a named README section, so the math lives in one place. Public identifiers get their contract in a doc comment; internal helpers (`resize`, `compact`, `sampleCount`, `theoreticalSlots`, `needsRehash`, `hintOversized`) document *why* they exist.
+- **Comments carry the derivation, not the mechanics**: every non-obvious decision points at `docs/set-rehash-en.md §N` or at a named README section, so the math lives in one place. Public identifiers get their contract in a doc comment; internal helpers (`resize`, `compact`, `sampleCount`, `theoreticalSlots`, `needsRehash`, `needsFreshMap`, `hintOversized`) document *why* they exist.
 - **In-repo terminology**: *rehash* is a rebuild of the map; *step* is the capacity class `theoreticalSlots(hint)` returns; *over-allocation* is the gap between what the map reserves and what it holds; *probe/sample* is the 256-element estimate. Use these words, not synonyms.
 - **Two thresholds, two mechanisms**: `needsRehash` watches a *descent* that crossed a boundary (`Remove`, `Subtract`); `hintOversized`/`compact` fix a *delivery that landed one step above its length* (`Extend`, `Intersection`, `Difference`, `NewFromSlices`, `AddAll`). Do not conflate them.
 - **Constants over literals**: `overlapSample` (256) and `samplingFloor` (`overlapSample * 16`, 4096) are named and derived in the README; never inline a sample size or a floor.
@@ -76,7 +76,7 @@ There is no Makefile, no CI configuration and no lint or coverage target. The su
 
 | File | Role |
 |---|---|
-| `set.go` | The entire package: `Set[T]`, `New`, `NewFromSlices`, every method, `Union`, `Intersection`, `sampleCount`, `theoreticalSlots`, `needsRehash`, `hintOversized` |
+| `set.go` | The entire package: `Set[T]`, `New`, `NewFromSlices`, every method, `Union`, `Intersection`, `sampleCount`, `theoreticalSlots`, `needsRehash`, `needsFreshMap`, `hintOversized` |
 | `set_test.go` | The behavioural suite: 34 tests, exhaustive algebra against a model |
 | `theoretical_slots_test.go` | Reads the runtime's real slot count (behind `unsafe`) and checks `theoreticalSlots` against it; the only tie between the model and the runtime |
 | `bench_test.go` | The benchmarks behind the README's Performance table (`go test -bench .`) |

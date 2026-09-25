@@ -50,7 +50,7 @@ The $0.4\%$ of the title is the bound we will prove for $\mathbb{E}[\mathcal{E}]
 
 ## 2. What the code does precisely
 
-The file `set.go` contains the reservation model (`theoreticalSlots`), two trigger rules (`needsRehash`, `hintOversized`) and the capacity accounting that decides when to reserve (`estimatedSlotsLeft`). We summarise them precisely, because the theorems are about them.
+The file `set.go` contains the reservation model (`theoreticalSlots`), two trigger rules (`needsRehash`, `hintOversized`), the reservation predicate for insertions (`needsFreshMap`) and the capacity accounting that decides when to reserve (`estimatedSlotsLeft`). We summarise them precisely, because the theorems are about them.
 
 ### 2.1. `theoreticalSlots(hint)` — the reservation model
 
@@ -74,7 +74,23 @@ Rehash:   m' := make(map, n)     // n = current number of elements
 
 It costs $\Theta(n)$ and it also **re-randomises** the placement of the keys (new seed). It releases memory but is neither free nor deterministic in its outcome: it is the "random experiment" the Excess Theorem analyses.
 
-### 2.3. `needsRehash(before, after)` — the trigger rule for deletions
+### 2.3. `needsFreshMap(target, addLen)` — the reservation predicate for insertions
+
+```
+needsFreshMap(target, addLen)  ⟺  left < addLen  and  2·(left + Len()) < T(target)
+    where left = estimatedSlotsLeft()
+```
+
+Called before inserting a batch of `addLen` elements into an existing map
+(`AddAll`, `Extend`): the first conjunct says the current step cannot hold the
+batch; the second that even if it doubled, the doubled map would sit below
+half of target's step, where building at `target` now is cheaper than the
+incremental growth the runtime would perform. `Extend` asks this of the sum of
+the operands to decide whether to probe, and again of its estimate once the
+probe has chosen `target` — the probe only exists to shrink the operand sum to
+what the receiver will actually reach.
+
+### 2.4. `needsRehash(before, after)` — the trigger rule for deletions
 
 Called after removing elements, with $before$ = how many there were and $after$ = how many remain ($after<before$):
 
@@ -88,7 +104,7 @@ if T ≤ 1024 (single-table):               YES ⟺  before > 7T/8  and  after �
 
 The last two lines are the heart of the design and read identically: **fire only when the element count crosses a threshold downward**, never while it is already below. This seemingly innocent property is what makes the infinite-rebuild loop impossible (§9).
 
-### 2.4. `hintOversized(hint, actual)` — the rule for freshly built maps
+### 2.5. `hintOversized(hint, actual)` — the rule for freshly built maps
 
 ```
 hintOversized(hint, actual)  ⟺  T(hint) > T(actual)
@@ -98,7 +114,7 @@ Used only when building a new `Set` (`NewFromSlices`, `AddAll`, `Extend`, `Diffe
 
 The three binary operations differ in how they choose `hint`, because each one knows something different about its result.
 
-`Difference` keeps the cheap path when no step can be crossed, and otherwise sizes the map from a probe, like the other two. Probing the **smaller** operand is what makes this work in both directions: probing `other` estimates the intersection, so what is left of $s$ is the result ($m$ minus the estimate), and probing $s$ counts the misses directly. Below `samplingFloor` the probe costs more than the sizing it saves, so it falls back to the upper bound `m`. Reserving `m` — what the code did before §2.4 gained the probe — makes a tiny result out of a large receiver allocate a map of the receiver's size; the probe removes that cost without touching the result.
+`Difference` keeps the cheap path when no step can be crossed, and otherwise sizes the map from a probe, like the other two. Probing the **smaller** operand is what makes this work in both directions: probing `other` estimates the intersection, so what is left of $s$ is the result ($m$ minus the estimate), and probing $s$ counts the misses directly. Below `samplingFloor` the probe costs more than the sizing it saves, so it falls back to the upper bound `m`. Reserving `m` — what the code did before §2.5 gained the probe — makes a tiny result out of a large receiver allocate a map of the receiver's size; the probe removes that cost without touching the result.
 
 ```go
 Difference:
@@ -114,9 +130,9 @@ differenceReservation:
 
 `Extend` and `Intersection` face the same unknown, but each sizes from a probe of its own: `Extend` probes each argument for elements new to `s` and to the arguments already folded, and `Intersection` probes the smallest operand for membership in all the others.
 
-A wrong estimate can never change an answer. It can only leave the reservation off its step, and `compact` then rebuilds — which is the same cost the over-allocation would have paid. The estimate therefore has to make that rebuild *rare*, not impossible; §2.5 gives the bound.
+A wrong estimate can never change an answer. It can only leave the reservation off its step, and `compact` then rebuilds — which is the same cost the over-allocation would have paid. The estimate therefore has to make that rebuild *rare*, not impossible; §2.6 gives the bound.
 
-### 2.5. `sampleCount` — how many probes, and why 256
+### 2.6. `sampleCount` — how many probes, and why 256
 
 The probe draws $n$ elements without replacement from a population of $N$ and
 scales the hit count up. The estimator is unbiased, its error is governed by the

@@ -50,7 +50,7 @@ El número $0{,}4\%$ del título es la cota que vamos a demostrar para $\mathbb{
 
 ## 2. Qué hace exactamente el código
 
-El fichero `set.go` contiene el modelo de reserva (`theoreticalSlots`), dos reglas de disparo (`needsRehash`, `hintOversized`) y la contabilidad de capacidad que decide cuándo se reserva (`estimatedSlotsLeft`). Las resumimos con precisión, porque los teoremas van sobre ellas.
+El fichero `set.go` contiene el modelo de reserva (`theoreticalSlots`), dos reglas de disparo (`needsRehash`, `hintOversized`), el predicado de reserva para inserciones (`needsFreshMap`) y la contabilidad de capacidad que decide cuándo se reserva (`estimatedSlotsLeft`). Las resumimos con precisión, porque los teoremas van sobre ellas.
 
 ### 2.1. `theoreticalSlots(hint)` — el modelo de reserva
 
@@ -74,7 +74,23 @@ Rehash:   m' := make(map, n)     // n = número actual de elementos
 
 Cuesta $\Theta(n)$ y además **vuelve a sortear** la colocación de las claves (nueva semilla). Devuelve memoria pero no es gratis ni determinista en su resultado: es el «experimento aleatorio» que el Teorema del Exceso analiza.
 
-### 2.3. `needsRehash(before, after)` — la regla de disparo en los borrados
+### 2.3. `needsFreshMap(target, addLen)` — el predicado de reserva para inserciones
+
+```
+needsFreshMap(target, addLen)  ⟺  left < addLen  y  2·(left + Len()) < T(target)
+    donde left = estimatedSlotsLeft()
+```
+
+Se llama antes de insertar un lote de `addLen` elementos en un mapa existente
+(`AddAll`, `Extend`): el primer conjunto dice que el escalón actual no puede
+albergar el lote; el segundo, que incluso duplicándose quedaría por debajo de
+la mitad del escalón de target, donde construir ya en `target` es más barato
+que el crecimiento incremental que haría el runtime. `Extend` se lo pregunta a
+la suma de los operandos para decidir si sondea, y de nuevo a su estimación
+una vez que el sondeo ha elegido `target` — el sondeo solo existe para encoger
+la suma de operandos hasta lo que el receptor alcanzará de verdad.
+
+### 2.4. `needsRehash(before, after)` — la regla de disparo en los borrados
 
 Se llama después de eliminar elementos, con $before$ = cuántos había y $after$ = cuántos quedan ($after<before$):
 
@@ -88,7 +104,7 @@ si T ≤ 1024 (mono-tabla):                 SÍ  ⟺  before > 7T/8  y  after �
 
 Las dos últimas líneas son el corazón del diseño y se leen igual: **dispara solamente cuando el número de elementos cruza un umbral hacia abajo**, nunca mientras ya está por debajo. Esta propiedad, aparentemente inocente, es la que hace imposible el bucle infinito de reconstrucciones (§9).
 
-### 2.4. `hintOversized(hint, actual)` — la regla para mapas recién creados
+### 2.5. `hintOversized(hint, actual)` — la regla para mapas recién creados
 
 ```
 hintOversized(hint, actual)  ⟺  T(hint) > T(actual)
@@ -98,7 +114,7 @@ Solo se usa al construir un `Set` nuevo (`NewFromSlices`, `AddAll`, `Extend`, `D
 
 Las tres operaciones binarias se diferencian en cómo eligen `hint`, porque cada una sabe algo distinto sobre su resultado.
 
-`Difference` conserva el camino barato cuando ningún escalón puede cruzarse y, en caso contrario, dimensiona el mapa con un sondeo, igual que las otras dos. Sondear el operando **menor** es lo que lo hace funcionar en ambas direcciones: sondear `other` estima la intersección, así que lo que queda de $s$ es el resultado ($m$ menos la estimación), y sondear $s$ cuenta directamente los que no están. Por debajo de `samplingFloor` el sondeo cuesta más de lo que ahorra, así que recurre a la cota superior `m`. Reservar `m` —lo que hacía el código antes de que el §2.4 incorporase el sondeo— hace que un resultado diminuto sobre un receptor grande asigne un mapa del tamaño del receptor; el sondeo elimina ese coste sin tocar el resultado.
+`Difference` conserva el camino barato cuando ningún escalón puede cruzarse y, en caso contrario, dimensiona el mapa con un sondeo, igual que las otras dos. Sondear el operando **menor** es lo que lo hace funcionar en ambas direcciones: sondear `other` estima la intersección, así que lo que queda de $s$ es el resultado ($m$ menos la estimación), y sondear $s$ cuenta directamente los que no están. Por debajo de `samplingFloor` el sondeo cuesta más de lo que ahorra, así que recurre a la cota superior `m`. Reservar `m` —lo que hacía el código antes de que la §2.5 incorporase el sondeo— hace que un resultado diminuto sobre un receptor grande asigne un mapa del tamaño del receptor; el sondeo elimina ese coste sin tocar el resultado.
 
 ```go
 Difference:
@@ -114,9 +130,9 @@ differenceReservation:
 
 `Extend` e `Intersection` se enfrentan a la misma incógnita, pero cada una dimensiona desde su propio sondeo: `Extend` sondea cada argumento en busca de elementos nuevos para `s` y para los argumentos ya plegados, e `Intersection` sondea el operando menor en busca de pertenencia a todos los demás.
 
-Una estimación equivocada no puede cambiar una respuesta. Solo puede dejar la reserva fuera de su escalón, y entonces `compact` reconstruye — que es el mismo coste que habría pagado la sobre-asignación. La estimación tiene, por tanto, que hacer que esa reconstrucción sea *rara*, no imposible; §2.5 da la cota.
+Una estimación equivocada no puede cambiar una respuesta. Solo puede dejar la reserva fuera de su escalón, y entonces `compact` reconstruye — que es el mismo coste que habría pagado la sobre-asignación. La estimación tiene, por tanto, que hacer que esa reconstrucción sea *rara*, no imposible; §2.6 da la cota.
 
-### 2.5. `sampleCount` — cuántos sondeos, y por qué 256
+### 2.6. `sampleCount` — cuántos sondeos, y por qué 256
 
 El sondeo extrae $n$ elementos sin reemplazo de una población de $N$ y extrapola
 el número de aciertos. El estimador es insesgado, su error lo gobierna la
