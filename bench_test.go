@@ -110,8 +110,8 @@ func BenchmarkExtend(b *testing.B) {
 	}
 }
 
-// Difference, cheap path: the subtraction cannot cross a step, so the receiver
-// is copied and trimmed.
+// Difference, cheap path: the subtraction cannot cross a step, so the
+// reservation is the receiver's length and no probe runs.
 func BenchmarkDifferenceCheapPath(b *testing.B) {
 	src := NewFromSlices(benchSeq(benchSet))
 	other := NewFromSlices([]int{1})
@@ -121,8 +121,8 @@ func BenchmarkDifferenceCheapPath(b *testing.B) {
 	}
 }
 
-// Difference, general path: the result may land a step lower, so the map is
-// reserved for the receiver's length and compacted afterwards.
+// Difference, general path: the result can land a step lower, so the reservation
+// comes from a probe of the smaller operand.
 func BenchmarkDifferenceGeneralPath(b *testing.B) {
 	src := NewFromSlices(benchSeq(benchSet))
 	other := NewFromSlices(benchSeq(benchSet - 1))

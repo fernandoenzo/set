@@ -16,7 +16,8 @@ import (
 	"slices"
 )
 
-// Set is an unordered set of comparable values.
+// Set is an unordered set of comparable values. capacity is the hint the map
+// was last reserved for, not the map's real capacity.
 type Set[T comparable] struct {
 	set      map[T]struct{}
 	capacity int
@@ -52,8 +53,8 @@ func (s *Set[T]) estimatedSlotsLeft() int {
 	return theoreticalSlots(max(s.Len(), s.capacity)) - s.Len()
 }
 
-// needsFreshMap reports whether a batch of addLen insertions into s should
-// land in a fresh map sized at target. See docs/set-rehash-en.md §2.3.
+// needsFreshMap reports whether a batch of addLen insertions into s should land
+// in a fresh map sized at target (docs/set-rehash-en.md §2.3).
 func (s *Set[T]) needsFreshMap(target, addLen int) bool {
 	left := s.estimatedSlotsLeft()
 	return left < addLen && 2*(left+s.Len()) < theoreticalSlots(target)
@@ -123,11 +124,9 @@ func (s *Set[T]) Extend(sets ...*Set[T]) {
 		extLen += other.Len()
 	}
 
-	// The arguments need not be new elements, and they overlap among
-	// themselves: fold them largest first, probing each for elements new to s
-	// and to those already folded, to size for what the receiver will reach
-	// rather than for the sum of the operands. See README, "Why the probe
-	// samples 256 elements".
+	// Fold largest first, probing each argument for elements new to s and to
+	// those already folded: size for what s will reach, not the operand sum.
+	// See README, "Why the probe samples 256 elements".
 	target := s.Len() + extLen
 	if s.needsFreshMap(target, extLen) {
 		order := make([]*Set[T], len(sets))
@@ -163,8 +162,7 @@ func (s *Set[T]) Extend(sets ...*Set[T]) {
 	s.compact()
 }
 
-// Retain keeps, in place, the elements present in every set. With no sets it
-// is a no-op; with a single set it keeps the elements of that set.
+// Retain keeps, in place, the elements present in every set.
 func (s *Set[T]) Retain(sets ...*Set[T]) {
 	if len(sets) == 0 {
 		return
@@ -177,9 +175,9 @@ func (s *Set[T]) Retain(sets ...*Set[T]) {
 
 // Difference returns s − other with the result on the step of its own length.
 func (s *Set[T]) Difference(other *Set[T]) *Set[T] {
-	// The result may land a step lower. One pass over s keeping the misses,
-	// reserved from a probe of the smaller operand and compacted below. See
-	// README, "Why the probe samples 256 elements".
+	// One pass over s keeping the misses, sized from a probe of the smaller
+	// operand and compacted below. See README, "Why the probe samples 256
+	// elements".
 	res := New[T](differenceReservation(s, other))
 	for v := range s.set {
 		if _, in := other.set[v]; !in {
@@ -190,10 +188,8 @@ func (s *Set[T]) Difference(other *Set[T]) *Set[T] {
 	return res
 }
 
-// differenceReservation returns the hint to reserve for s − other: the
-// receiver's length when no step can be crossed even removing everything the
-// other operand could hold, a probe of the smaller operand otherwise. A wrong
-// estimate only moves the reservation; compact corrects it.
+// differenceReservation returns the hint for s − other: the receiver's length
+// when no step can be crossed, a probe of the smaller operand otherwise.
 func differenceReservation[T comparable](s, other *Set[T]) int {
 	if maxDifference := s.Len() - other.Len(); maxDifference > 0 {
 		if !hintOversized(s.Len(), maxDifference) {
@@ -235,9 +231,8 @@ func (s *Set[T]) Rehash() {
 	s.resize(s.Len())
 }
 
-// Clone returns an independent copy that keeps the source's reserved capacity
-// and over-allocation, so it keeps growing at the same cost. Use Copy for a
-// compact copy.
+// Clone copies the source's reserved capacity and over-allocation, so the copy
+// grows at the same cost; use Copy for a compact copy.
 func (s *Set[T]) Clone() *Set[T] {
 	return &Set[T]{
 		set:      maps.Clone(s.set),
@@ -252,8 +247,7 @@ func (s *Set[T]) Copy() *Set[T] {
 	return res
 }
 
-// compact rebuilds the map when its reservation sits a step above its length,
-// so a set sized from an estimate lands on the step of what it holds.
+// compact rebuilds the map when its reservation sits a step above its length.
 func (s *Set[T]) compact() {
 	if hintOversized(s.capacity, s.Len()) {
 		s.Rehash()
@@ -339,14 +333,10 @@ func Intersection[T comparable](sets ...*Set[T]) *Set[T] {
 		return New[T](0)
 	}
 
-	// The result is a subset of the smallest operand but usually far smaller:
-	// reserving its length over-allocates by up to two steps when the operands
-	// overlap, and the delivery then has to be rebuilt. Probe the operand to
-	// size for the estimate instead. sampleCount never returns more than the
-	// population it probed, so the estimate is already bounded by the smallest
-	// operand. See README.
+	// Size from a probe of the smallest operand: sampleCount never returns more
+	// than the population it probed, so the estimate is bounded by it. See README.
 	capacity := minSet.Len()
-	if capacity >= samplingFloor {
+	if capacity > overlapSample {
 		inMin := func(v T) bool {
 			for _, other := range sets {
 				if other == minSet {
@@ -362,33 +352,25 @@ func Intersection[T comparable](sets ...*Set[T]) *Set[T] {
 	}
 
 	res := New[T](capacity)
+next:
 	for v := range minSet.set {
-		inAll := true
 		for _, other := range sets {
 			if other == minSet {
 				continue
 			}
 			if _, in := other.set[v]; !in {
-				inAll = false
-				break
+				continue next
 			}
 		}
-		if inAll {
-			res.set[v] = struct{}{}
-		}
+		res.set[v] = struct{}{}
 	}
 	res.compact()
 	return res
 }
 
-// overlapSample is how many elements of an operand are probed to estimate an
-// intersection before the result is sized. See README, "Why the probe samples
-// 256 elements", for the derivation.
+// overlapSample is how many elements of an operand are probed before sizing
+// the result. See README, "Why the probe samples 256 elements".
 const overlapSample = 256
-
-// samplingFloor is the size below which the probe is not worth its cost. See
-// README, same section.
-const samplingFloor = overlapSample * 16
 
 // sampleCount returns how many elements of small satisfy keep: exact up to
 // overlapSample, estimated beyond it.
@@ -416,11 +398,9 @@ func sampleCount[T comparable](small *Set[T], keep func(T) bool) int {
 	return count * n / probed
 }
 
-// theoreticalSlots returns the slots make(map, hint) reserves on creation:
-// target = hint*8/7, a power-of-two directory of ceil(target/1024) entries and
-// power-of-two tables of target/dir entries (at least 8). The rounding can leave
-// the usable budget (7/8 of the slots) below hint: those are the cracks
-// needsRehash looks for. See docs/set-rehash-en.md §2.1.
+// theoreticalSlots returns the slots make(map, hint) reserves: the rounding can
+// leave the usable budget, 7/8 of the slots, below hint. See
+// docs/set-rehash-en.md §2.1.
 func theoreticalSlots(hint int) int {
 	if hint <= 8 {
 		return 8
@@ -462,9 +442,8 @@ func needsRehash(before, after int) bool {
 	return before > band && after <= band
 }
 
-// hintOversized reports whether a map built with make(hint) and filled to
-// actual <= hint landed below the step it reserved. See docs/set-rehash-en.md
-// §2.5.
+// hintOversized reports whether a map built with make(hint) landed below the
+// step it reserved for actual elements. See docs/set-rehash-en.md §2.5.
 func hintOversized(hint, actual int) bool {
 	return theoreticalSlots(hint) > theoreticalSlots(actual)
 }

@@ -114,21 +114,20 @@ Used only when building a new `Set` (`NewFromSlices`, `AddAll`, `Extend`, `Diffe
 
 The three binary operations differ in how they choose `hint`, because each one knows something different about its result.
 
-`Difference` keeps the cheap path when no step can be crossed, and otherwise sizes the map from a probe, like the other two. Probing the **smaller** operand is what makes this work in both directions: probing `other` estimates the intersection, so what is left of $s$ is the result ($m$ minus the estimate), and probing $s$ counts the misses directly. Below `samplingFloor` the probe costs more than the sizing it saves, so it falls back to the upper bound `m`. Reserving `m` — what the code did before §2.5 gained the probe — makes a tiny result out of a large receiver allocate a map of the receiver's size; the probe removes that cost without touching the result.
+`Difference` sizes the map from a probe, like the other two, and falls back to the upper bound `m` only when the subtraction provably cannot cross a step — `!hintOversized(m, m − n)`. Probing the **smaller** operand is what makes the probe work in both directions: probing `other` estimates the intersection, so what is left of `s` is the result ($m$ minus the estimate), and probing `s` counts the misses directly. Reserving `m` — what the code did before §2.5 gained the probe — makes a tiny result out of a large receiver allocate a map of the receiver's size; the probe removes that cost without touching the result.
 
 ```go
 Difference:
-  if T(m) = T(m − min(m,n)):      res := Copy(s); res.Subtract(other)
-  else:                            res := make(differenceReservation(s, other))
-                                   fill res with the misses, then compact
+  res := make(differenceReservation(s, other))
+  fill res with the misses, then compact
 
 differenceReservation:
-  if min(m,n) < samplingFloor:     return m
+  if m − n > 0 and !hintOversized(m, m − n):  return m
   if n < m:                        return m − sampleCount(other, s.Contains)
   else:                            return sampleCount(s, v ↦ v ∉ other)
 ```
 
-`Extend` and `Intersection` face the same unknown, but each sizes from a probe of its own: `Extend` probes each argument for elements new to `s` and to the arguments already folded, and `Intersection` probes the smallest operand for membership in all the others.
+`Extend`, `Intersection` and `Difference` face the same unknown, but each sizes from a probe of its own: `Extend` probes each argument for elements new to `s` and to the arguments already folded, `Intersection` probes the smallest operand for membership in all the others, and `Difference` probes the smaller operand as described above.
 
 A wrong estimate can never change an answer. It can only leave the reservation off its step, and `compact` then rebuilds — which is the same cost the over-allocation would have paid. The estimate therefore has to make that rebuild *rare*, not impossible; §2.6 gives the bound.
 

@@ -18,7 +18,7 @@ s.Len()         // 2
 
 **Requirements.** Go 1.27.1 or later, as declared in `go.mod`. The module path is
 `github.com/fernandoenzo/set`; pin a release with `go get
-github.com/fernandoenzo/set@v1.1.0`. There are no dependencies to pull in.
+github.com/fernandoenzo/set@v1.2.0`. There are no dependencies to pull in.
 
 ## Table of contents
 
@@ -38,7 +38,7 @@ github.com/fernandoenzo/set@v1.1.0`. There are no dependencies to pull in.
   - [The sampling distribution is hypergeometric](#the-sampling-distribution-is-hypergeometric)
   - [From hypergeometric to binomial to normal](#from-hypergeometric-to-binomial-to-normal)
   - [Where 256 comes from: Cochran's formula](#where-256-comes-from-cochrans-formula)
-  - [Why small sets opt out](#why-small-sets-opt-out)
+  - [When the probe runs](#when-the-probe-runs)
   - [A caveat on exactness](#a-caveat-on-exactness)
 - [Verifying the design](#verifying-the-design)
 - [License](#license)
@@ -223,13 +223,11 @@ so none of them needs a rebuild afterwards. The probe's sample size and its erro
 are derived in "Why the probe samples 256 elements" below; the rehash rules
 themselves in `docs/set-rehash-en.md`.
 
-Below `samplingFloor` the probe would cost more than the sizing it saves, so
-`Difference` falls back to reserving the receiver's length; there it does not pay
-for a second pass over the smaller operand to buy a closer reservation, because
-`make` rounds both to the same step in the common case. It also keeps the cheap
-path for the case where no step can be crossed: when the subtraction provably
-cannot drop the result far enough, it copies and deletes instead of walking the
-misses into a fresh map.
+`Difference` is the one that must also handle the case where no reservation can
+help: when the subtraction provably cannot cross a step — `!hintOversized` — it
+reserves the receiver's length and walks the misses into that map, because
+nothing smaller is safe. Whenever a step *can* be crossed it sizes from a probe
+of the smaller operand, like the other two, and compacts afterwards.
 
 ## Performance
 
@@ -243,7 +241,7 @@ indicative; benchmark on your own workload.
 | `Contains` | one map lookup, no allocation |
 | `IsSubset` / `Disjoint` | no allocation |
 | `GetAll` | one allocation (the result slice) |
-| `Difference` | one pass, with the result map sized from a probe of the smaller operand (the upper bound only below `samplingFloor`): a tiny result out of a huge receiver no longer allocates a map of the receiver's size |
+| `Difference` | one pass over the receiver, with the result map sized from a probe of the smaller operand (the upper bound when no step can be crossed): a tiny result out of a huge receiver no longer allocates a map of the receiver's size |
 
 Hot loops range directly over the internal map rather than going through
 iterators, and results are pre-sized, so the common paths do not allocate beyond
@@ -253,8 +251,8 @@ report them for your own machine.
 
 ## Why the probe samples 256 elements
 
-`Extend` and `Intersection` must reserve a map for a result whose size they
-cannot know: how many of an operand's elements are new, or survive the
+`Extend`, `Intersection` and `Difference` must reserve a map for a result whose
+size they cannot know: how many of an operand's elements are new, or survive the
 intersection, depends on an overlap that is only visible once the pass is made.
 Undersizing costs a runtime rehash; sizing for the whole operand over-allocates
 by up to two capacity steps and pays the same rehash. So they estimate the
@@ -304,12 +302,12 @@ $$\mathrm{CV}[\hat{k}]
 ### From hypergeometric to binomial to normal
 
 The finite population correction is the only thing separating the hypergeometric
-from the binomial. In the regime `sampleCount` runs — $n=256$ against
-$N\ge4096$, the floor below — the correction is at worst $0{,}968$, i.e. $6\%$
-low in variance and so $3\%$ low in standard error. Dropping it therefore
-*overstates* the error, which is the safe direction: $\mathrm{Bin}(n,p)$ is
-indistinguishable from $H(N,n,p)$ there, and the standard error is taken as
-$\sqrt{p(1-p)/n}$.
+from the binomial. In the regime `sampleCount` runs — $n=256$ against $N>256$,
+the threshold above which it estimates — the correction is at worst $0{,}968$
+for $N\ge4096$ and smaller below it (down to $1/16$ at $N=257$); dropping it
+therefore overstates the error either way, which is the safe direction:
+$\mathrm{Bin}(n,p)$ is a good stand-in for $H(N,n,p)$ there, and the standard
+error is taken as $\sqrt{p(1-p)/n}$.
 
 The binomial is then approximated by the normal, which is what makes the bound a
 one-line calculation once $Z=2$ is fixed. That approximation has a known edge:
@@ -371,23 +369,23 @@ normal, and $2\sigma$ is a criterion rather than a guarantee. The cost is
 negligible — 256 lookups against a pass of $N$; at $N=10^6$ that is $0.026\%$ of
 the work being sized.
 
-### Why small sets opt out
+### When the probe runs
 
-`samplingFloor` is `overlapSample * 16 = 4096`. The probe pays for itself in
-proportion to what it avoids: with $n=256$ and $N=4096$ it adds at most $6\%$ to
-the pass, and below that it grows as $1/N$ while the mistake it prevents shrinks
-as $N$. The measured crossover is near $N=10^3$, where the probe costs more than
-the sizing it saves.
+Each caller probes under its own gate, and below those gates the estimate is
+either exact or absent:
 
-Below the floor the finite population correction stops being negligible in the
-other direction too — at $N$ approaching $n$ it would tighten the bound rather
-than loosen it — so the floor is also what keeps the binomial substitution
-harmless.
+- `Extend` probes when its receiver would need a fresh map (`needsFreshMap`):
+  a resize is coming anyway, so the sample rides along with it.
+- `Intersection` probes whenever the smallest operand exceeds `overlapSample`;
+  it has no counting pass for the probe to replace, but the estimate is bounded
+  by the population it probed, so the reservation can never exceed the operand.
+- `Difference` probes whenever the result can cross a step (`hintOversized`);
+  when it cannot, the receiver's length is already on the right step and no
+  probe runs.
 
-`Intersection` uses the same floor although it could afford a smaller one, but
-for a different reason it cannot: it has no counting pass for the probe to
-replace, so the probe is pure addition there and its threshold must clear the
-whole cost of a wrong reservation rather than a fraction of it.
+An operand of at most `overlapSample` elements is counted exactly rather than
+estimated, so those callers pay the sample only on the large operands where it
+is a rounding error against the pass it sizes.
 
 ### A caveat on exactness
 

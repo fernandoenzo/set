@@ -764,7 +764,8 @@ func TestEstimatedSizingStillDeliversOnStep(t *testing.T) {
 
 // differenceReservation is what Difference reserves before the pass. It must be
 // tight when the smaller operand is large enough to probe, and the upper bound
-// below the floor, where the probe costs more than the sizing it saves.
+// when no step can be crossed (!hintOversized), where reserving the receiver's
+// length is the only safe guess.
 func TestDifferenceReservationTracksResult(t *testing.T) {
 	const m = 1_000_000
 	s := NewFromSlices(makeSeq(m))
@@ -778,7 +779,7 @@ func TestDifferenceReservationTracksResult(t *testing.T) {
 		{"tiny result from a large other", NewFromSlices(makeSeq(m - 1)), 1, true},
 		{"half the receiver", NewFromSlices(makeSeq(m / 2)), m / 2, true},
 		{"disjoint small other", NewFromSlices(disjointSeq(m / 100)), m, false},
-		{"below the sampling floor", NewFromSlices(makeSeq(2)), m - 2, false},
+		{"no step crossed", NewFromSlices(makeSeq(2)), m - 2, false},
 	}
 	for _, c := range cases {
 		got := differenceReservation(s, c.other)
@@ -896,14 +897,14 @@ func TestAddAllCompactsAfterResize(t *testing.T) {
 
 // Extend's probe asks whether a probed element is new to the receiver; the
 // "already there" branch only runs when the receiver shares elements with a
-// probed argument large enough to reach the sampling floor.
+// probed argument large enough that Extend's probe opens (needsFreshMap).
 func TestExtendProbeSkipsExistingElements(t *testing.T) {
-	const n = 20000 // above samplingFloor
+	const n = 20000 // large enough that the probe estimates
 	recv := NewFromSlices(makeSeq(n / 2))
 	other := NewFromSlices(makeSeq(n)) // half its elements are already in recv
 
-	if recv.Len()+other.Len() < samplingFloor {
-		t.Fatalf("operands do not reach the sampling floor")
+	if !recv.needsFreshMap(recv.Len()+other.Len(), other.Len()) {
+		t.Fatalf("Extend's probe does not run for these operands")
 	}
 	recv.Extend(other)
 
@@ -918,7 +919,7 @@ func TestExtendProbeSkipsExistingElements(t *testing.T) {
 
 // Intersection's probe asks whether a probed element of the smallest operand is
 // present in every other one; the "absent" branch needs a smallest operand above
-// the floor that shares only part of its elements with a larger one.
+// overlapSample that shares only part of its elements with a larger one.
 func TestIntersectionProbeSeesAbsentElements(t *testing.T) {
 	const n = 20000
 	// a and b share their first half; a's second half is absent from b, so the
@@ -926,8 +927,8 @@ func TestIntersectionProbeSeesAbsentElements(t *testing.T) {
 	a := NewFromSlices(makeSeq(n))
 	b := NewFromSlices(append(makeSeq(n/2), seqFrom(100000, 100000+n/2)...))
 
-	if min(a.Len(), b.Len()) < samplingFloor {
-		t.Fatalf("smallest operand does not reach the sampling floor")
+	if min(a.Len(), b.Len()) <= overlapSample {
+		t.Fatalf("smallest operand does not exceed overlapSample, so Intersection does not probe")
 	}
 	got := Intersection(a, b)
 
@@ -940,35 +941,25 @@ func TestIntersectionProbeSeesAbsentElements(t *testing.T) {
 	assertMatches(t, got, modelOf(makeSeq(n/2)...))
 }
 
-// sampleCount is documented to be exact — counting rather than scaling — when
-// the probed operand holds no more than overlapSample elements. Extend is the
-// only caller that can reach that path: the others guard their operand above
-// samplingFloor, but an argument here can be small while the total is large.
-func TestExtendProbesSmallArgumentExactly(t *testing.T) {
-	recv := NewFromSlices(makeSeq(6000))     // large receiver
-	arg := NewFromSlices(append(makeSeq(50), // 50 already present
-		seqFrom(100000, 100050)...)) // 50 new
-
-	if arg.Len() > overlapSample {
-		t.Fatalf("argument holds %d elements, want at most %d", arg.Len(), overlapSample)
+// sampleCount counts exactly (no scaling) when the probed operand holds no more
+// than overlapSample elements, and returns the operand's length when the
+// predicate holds for every element it probes.
+func TestSampleCountExactUpToOverlapSample(t *testing.T) {
+	small := NewFromSlices(makeSeq(100)) // 0..99
+	if small.Len() > overlapSample {
+		t.Fatalf("small holds %d elements: the exact path is no longer covered", small.Len())
 	}
-	if recv.Len()+arg.Len() < samplingFloor {
-		t.Fatalf("total does not reach the sampling floor, so no probe runs")
+	if got := sampleCount(small, func(v int) bool { return v%2 == 0 }); got != 50 {
+		t.Fatalf("sampleCount(small, even) = %d, want the exact 50", got)
 	}
 
-	recv.Extend(arg)
-
-	if recv.Len() != 6050 {
-		t.Fatalf("Len() = %d, want 6050", recv.Len())
+	big := NewFromSlices(makeSeq(1000))
+	if big.Len() <= overlapSample {
+		t.Fatalf("big holds %d elements: the estimated path is no longer covered", big.Len())
 	}
-	if hintOversized(recv.capacity, recv.Len()) {
-		t.Fatalf("capacity = %d reserves above the step for Len = %d", recv.capacity, recv.Len())
+	if got := sampleCount(big, func(int) bool { return true }); got != 1000 {
+		t.Fatalf("sampleCount(big, all) = %d, want the scaled 1000", got)
 	}
-	want := modelOf(makeSeq(6000)...)
-	for _, v := range seqFrom(100000, 100050) {
-		want[v] = struct{}{}
-	}
-	assertMatches(t, recv, want)
 }
 
 // extendOf is Union through Extend, the path the estimation covers.

@@ -114,21 +114,20 @@ Solo se usa al construir un `Set` nuevo (`NewFromSlices`, `AddAll`, `Extend`, `D
 
 Las tres operaciones binarias se diferencian en cómo eligen `hint`, porque cada una sabe algo distinto sobre su resultado.
 
-`Difference` conserva el camino barato cuando ningún escalón puede cruzarse y, en caso contrario, dimensiona el mapa con un sondeo, igual que las otras dos. Sondear el operando **menor** es lo que lo hace funcionar en ambas direcciones: sondear `other` estima la intersección, así que lo que queda de $s$ es el resultado ($m$ menos la estimación), y sondear $s$ cuenta directamente los que no están. Por debajo de `samplingFloor` el sondeo cuesta más de lo que ahorra, así que recurre a la cota superior `m`. Reservar `m` —lo que hacía el código antes de que la §2.5 incorporase el sondeo— hace que un resultado diminuto sobre un receptor grande asigne un mapa del tamaño del receptor; el sondeo elimina ese coste sin tocar el resultado.
+`Difference` dimensiona el mapa con un sondeo, igual que las otras dos, y recurre a la cota superior `m` solo cuando la resta no puede cruzar ningún escalón — `!hintOversized(m, m − n)`. Sondear el operando **menor** es lo que hace funcionar el sondeo en ambas direcciones: sondear `other` estima la intersección, así que lo que queda de `s` es el resultado ($m$ menos la estimación), y sondear `s` cuenta directamente los que no están. Reservar `m` —lo que hacía el código antes de que la §2.5 incorporase el sondeo— hace que un resultado diminuto sobre un receptor grande asigne un mapa del tamaño del receptor; el sondeo elimina ese coste sin tocar el resultado.
 
 ```go
 Difference:
-  si T(m) = T(m − min(m,n)):      res := Copy(s); res.Subtract(other)
-  si no:                          res := make(differenceReservation(s, other))
-                                  llenar res con los que no están, y compactar
+  res := make(differenceReservation(s, other))
+  llenar res con los que no están, y compactar
 
 differenceReservation:
-  si min(m,n) < samplingFloor:    return m
+  si m − n > 0 y !hintOversized(m, m − n):  return m
   si n < m:                       return m − sampleCount(other, s.Contains)
   si no:                          return sampleCount(s, v ↦ v ∉ other)
 ```
 
-`Extend` e `Intersection` se enfrentan a la misma incógnita, pero cada una dimensiona desde su propio sondeo: `Extend` sondea cada argumento en busca de elementos nuevos para `s` y para los argumentos ya plegados, e `Intersection` sondea el operando menor en busca de pertenencia a todos los demás.
+`Extend`, `Intersection` y `Difference` se enfrentan a la misma incógnita, pero cada una dimensiona desde su propio sondeo: `Extend` sondea cada argumento en busca de elementos nuevos para `s` y para los argumentos ya plegados, `Intersection` sondea el operando menor en busca de pertenencia a todos los demás, y `Difference` sondea el operando menor como se describe arriba.
 
 Una estimación equivocada no puede cambiar una respuesta. Solo puede dejar la reserva fuera de su escalón, y entonces `compact` reconstruye — que es el mismo coste que habría pagado la sobre-asignación. La estimación tiene, por tanto, que hacer que esa reconstrucción sea *rara*, no imposible; §2.6 da la cota.
 
