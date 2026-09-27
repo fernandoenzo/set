@@ -92,7 +92,7 @@ Go modules, no Makefile and no CI configuration. `go test ./...` runs the whole 
 - **Dependencies**: none. Standard library only (`iter`, `maps`, `slices`, `math/bits` in `set.go`; `math/rand/v2`, `slices`, `testing` in the suite). No `go.sum`, no mocking library, no assertion library.
 - **API shape**: generics only (`Set[T comparable]`), pointer receiver for every mutator and reader, free functions (`Union`, `Intersection`) for the operations that need no receiver.
 - **Docs are bilingual**: `docs/set-rehash-en.md` and `docs/set-rehash-es.md` are the same argument in two languages; a change to one is a change to both.
-- **Published versions**: v1.1.0 is the current API, and the README documents it.
+- **Published versions live in the tags**: the released versions are the repository's tags (`git tag -l`), and neither this file nor the README names one. A version written down here goes stale on the next release, and the tags are already the record.
 - **The `go` directive is a consumer requirement**: it gates download, not only the local toolchain, so a `go 1.27.1` module makes older toolchains fetch a newer one or fail. Raising it is a breaking change for consumers; only raise it above the newest patch with a reason.
 
 ## Git Workflow

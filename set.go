@@ -91,6 +91,9 @@ func (s *Set[T]) Add(v T) {
 
 // AddAll inserts every given element.
 func (s *Set[T]) AddAll(e ...T) {
+	if len(e) == 0 {
+		return
+	}
 	if len(e) == 1 {
 		s.Add(e[0])
 		return
@@ -119,11 +122,16 @@ func (s *Set[T]) AddSeq(it iter.Seq[T]) {
 
 // Extend adds every element of the given sets to s.
 func (s *Set[T]) Extend(sets ...*Set[T]) {
+	if len(sets) == 0 {
+		return
+	}
 	extLen := 0
 	for _, other := range sets {
 		extLen += other.Len()
 	}
-
+	if extLen == 0 {
+		return
+	}
 	// Fold largest first, probing each argument for elements new to s and to
 	// those already folded: size for what s will reach, not the operand sum.
 	// See README, "Why the probe samples 256 elements".

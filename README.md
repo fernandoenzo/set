@@ -17,8 +17,9 @@ s.Len()         // 2
 ```
 
 **Requirements.** Go 1.27.1 or later, as declared in `go.mod`. The module path is
-`github.com/fernandoenzo/set`; pin a release with `go get
-github.com/fernandoenzo/set@v1.2.0`. There are no dependencies to pull in.
+`github.com/fernandoenzo/set`; `go get github.com/fernandoenzo/set@latest`
+takes the latest release, and `@<tag>` pins one (`git tag -l` lists them).
+There are no dependencies to pull in.
 
 ## Table of contents
 
