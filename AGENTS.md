@@ -4,7 +4,7 @@
 
 `set` is a generic Go package exposing `Set[T comparable]`, an unordered set of comparable values backed by a `map[T]struct{}` that keeps its memory proportional to the number of elements it holds — including after large deletions. Go maps grow on insert and never shrink on delete, so the set rebuilds its map ("rehash") when a deletion has fallen far enough for the rebuild to pay off. The rules are derived, not tuned: `docs/set-rehash-en.md` models Go's Swiss-table runtime exactly and proves that after a rebuild the expected extra memory stays below 0.4% of the capacity step.
 
-The zero value (`var s set.Set[T]`) is a usable empty set; the map is created by the first write. A nil `*Set` is not usable. There are no external dependencies.
+The zero value (`var s set.Set[T]`) is a usable empty set; the map is created by the first write. A nil `*Set` is not usable. `SyncSet[T]` (`syncset.go`) wraps the same type behind an `RWMutex` for callers that do share a set; the plain type stays lock-free. There are no external dependencies.
 
 ## Architecture & Data Flow
 
@@ -29,12 +29,13 @@ Four layers:
 2. **Reservation model** (`theoreticalSlots`, `pow2ceil`, `hintOversized`): mirrors the runtime's sizing — `target = hint*8/7`, a power-of-two directory of `ceil(target/1024)` entries and power-of-two tables of `target/dir` slots (at least 8). The rounding can leave the usable budget (7/8 of the slots) below the hint; those cracks are what `hintOversized` detects.
 3. **Trigger rule** (`needsRehash`): fires on threshold *crossings*, not zones, so each capacity step is rebuilt at most once per monotone descent.
 4. **Probe estimator** (`sampleCount`, `overlapSample`): `Extend`, `Intersection` and `Difference` cannot know their result size, so they size the map from a 256-element sample of an operand and let `compact()` correct a bad estimate with a rebuild — the estimate decides how much work is done, never what the set contains.
+5. **Concurrency wrapper** (`syncset.go`): `SyncSet[T]` holds a `Set` by value plus an `RWMutex` and an identity. Single-set methods take the lock in the obvious mode; multi-set methods go through `lockAll`, which sorts the requested locks by identity and collapses repeats, so aliased and inverted-order operands cannot deadlock.
 
 ## Key Directories
 
 | Path | Purpose |
 |---|---|
-| `.` | The package itself (`set.go`), its suite (`set_test.go`), `go.mod`, `README.md` |
+| `.` | The package itself (`set.go`, `syncset.go`), its suites (`set_test.go`, `syncset_test.go`), `go.mod`, `README.md` |
 | `docs/` | The rehash derivation, in English (`set-rehash-en.md`) and Spanish (`set-rehash-es.md`) |
 
 ## Development Commands
@@ -43,7 +44,7 @@ Four layers:
 # Run the behavioural suite
 go test ./...
 
-# Same suite under the race detector (no shared state, but it must stay clean)
+# Same suite under the race detector (the plain type shares nothing; SyncSet must be clean)
 go test -race ./...
 
 # Verbose output
@@ -65,12 +66,14 @@ Go modules, no Makefile and no CI configuration. `go test ./...` runs the whole 
 - **In-repo terminology**: *rehash* is a rebuild of the map; *step* is the capacity class `theoreticalSlots(hint)` returns; *over-allocation* is the gap between what the map reserves and what it holds; *probe/sample* is the 256-element estimate. Use these words, not synonyms.
 - **Two thresholds, two mechanisms**: `needsRehash` watches a *descent* that crossed a boundary (`Remove`, `Subtract`); `hintOversized`/`compact` fix a *delivery that landed one step above its length* (`Extend`, `Intersection`, `Difference`, `NewFromSlices`, `AddAll`). Do not conflate them.
 - **Constants over literals**: `overlapSample` (256) is named and derived in the README; never inline the sample size.
-- **Self-operations must stay valid**: `s.Extend(s)`, `s.Retain(s)`, `s.Subtract(s)` and zero-valued arguments are in scope, and `resize` replaces the receiver wholesale (`*s = *rebuilt`) — an internal lock would deadlock on re-entry and be copied by that assignment. See the README on why the set carries no concurrency control.
-- **No background work**: no goroutines, no finalizers, no `unsafe`. Keep it that way.
+- **Self-operations must stay valid**: `s.Extend(s)`, `s.Retain(s)`, `s.Subtract(s)` and zero-valued arguments are in scope, and `resize` replaces the receiver wholesale (`*s = *rebuilt`) — which is why `Set` carries no lock (it would be copied by that assignment) and why `SyncSet` holds its `Set` by value and never re-enters a lock it holds. `lockAll` collapses repeats, so `s.Extend(s)` locks `s` once.
+- **No background work**: no goroutines, no finalizers, no `unsafe`. Keep it that way. `SyncSet` gets its lock order from a counter (`lastID`/`setID`), not from pointer addresses, precisely to avoid `unsafe` and to stay reproducible.
+- **Lock order is the deadlock proof**: every `SyncSet` has an identity assigned in construction order, and `lockAll` sorts requests by it and collapses repeats. Never take a `SyncSet` lock outside `lockAll`; never call a public `SyncSet` method while holding one (it would re-enter). Iterate through `GetAll`, not `IterAll`, when the body touches a set.
 - **Iteration is unordered**: never let a public result depend on map iteration order (`GetAll` documents it, `Union`/`Intersection` build from ranges).
-- **Table-driven tests with a reference model**: `TestSetAlgebraMatchesModel` checks every ordered pair of subsets of `{0,1,2}` against `map[int]struct{}`; `TestMutatorsMatchModel` runs 200 seeded random trials against the same model. New behaviour goes into that model comparison, not into ad-hoc assertions.
+- **Table-driven tests with a reference model**: `TestSetAlgebraMatchesModel` checks every ordered pair of subsets of `{0,1,2}` against `map[int]struct{}`; `TestMutatorsMatchModel` runs 200 seeded random trials against the same model. `syncset_test.go` mirrors both (`TestSyncSetAlgebraMatchesModel`, `TestSyncMutatorsMatchModel`) plus the zero-value, self-operation and concurrency contracts. New behaviour goes into that model comparison, not into ad-hoc assertions.
+- **Concurrency tests have a budget**: `mustFinish` fails a concurrency test that does not return within its budget, so a regression names the shape that deadlocked instead of stalling the package until the go test timeout. Do not compare values measured by two separate lock acquisitions (`s.Len()` against `s.GetAll()`): a writer may commit between them, and that is the documented contract, not a bug.
 - **Seeded randomness**: `rand.New(rand.NewPCG(0xC0FFEE, 0xBEEF))` — deterministic trials, no flaky runs.
-- **Helpers stay unexported and prefixed by role**: `modelOf`, `setOf`, `assertMatches`, `makeSeq`, `disjointSeq`, `extendOf`.
+- **Helpers stay unexported and prefixed by role**: `modelOf`, `setOf`, `assertMatches`, `assertSyncMatches`, `makeSeq`, `disjointSeq`, `extendOf`, `mustFinish`.
 
 ## Important Files
 
@@ -78,6 +81,8 @@ Go modules, no Makefile and no CI configuration. `go test ./...` runs the whole 
 |---|---|
 | `set.go` | The entire package: `Set[T]`, `New`, `NewFromSlices`, every method, `Union`, `Intersection`, `sampleCount`, `theoreticalSlots`, `needsRehash`, `needsFreshMap`, `hintOversized` |
 | `set_test.go` | The behavioural suite: 34 tests, exhaustive algebra against a model |
+| `syncset.go` | `SyncSet[T]`: the concurrent wrapper — `lockAll`/`unlockAll`, `setID`, and one method per `Set` method |
+| `syncset_test.go` | The wrapper's suite: the same model comparisons, the zero-value and self-operation contracts, and the deadlock shapes under a budget |
 | `theoretical_slots_test.go` | Reads the runtime's real slot count (behind `unsafe`) and checks `theoreticalSlots` against it; the only tie between the model and the runtime |
 | `bench_test.go` | The benchmarks behind the README's Performance table (`go test -bench .`) |
 | `LICENSE` | GPLv3 full text (byte-identical to `nvfp/LICENSE`) |
@@ -89,8 +94,8 @@ Go modules, no Makefile and no CI configuration. `go test ./...` runs the whole 
 ## Runtime/Tooling Preferences
 
 - **Language**: Go 1.27 — the `go` directive in `go.mod` pins the newest available patch (currently `1.27.1`); bump it when a new patch ships.
-- **Dependencies**: none. Standard library only (`iter`, `maps`, `slices`, `math/bits` in `set.go`; `math/rand/v2`, `slices`, `testing` in the suite). No `go.sum`, no mocking library, no assertion library.
-- **API shape**: generics only (`Set[T comparable]`), pointer receiver for every mutator and reader, free functions (`Union`, `Intersection`) for the operations that need no receiver.
+- **Dependencies**: none. Standard library only (`iter`, `maps`, `slices`, `math/bits` in `set.go`; `cmp`, `iter`, `slices`, `sync`, `sync/atomic` in `syncset.go`; `math/rand/v2`, `slices`, `sync`, `testing` in the suites). No `go.sum`, no mocking library, no assertion library.
+- **API shape**: generics only (`Set[T comparable]`, `SyncSet[T comparable]`), pointer receiver for every mutator and reader, free functions (`Union`, `Intersection`, `SyncUnion`, `SyncIntersection`) for the operations that need no receiver. `SyncSet` mirrors the `Set` surface method for method, so the two stay comparable.
 - **Docs are bilingual**: `docs/set-rehash-en.md` and `docs/set-rehash-es.md` are the same argument in two languages; a change to one is a change to both.
 - **Published versions live in the tags**: the released versions are the repository's tags (`git tag -l`), and neither this file nor the README names one. A version written down here goes stale on the next release, and the tags are already the record.
 - **The `go` directive is a consumer requirement**: it gates download, not only the local toolchain, so a `go 1.27.1` module makes older toolchains fetch a newer one or fail. Raising it is a breaking change for consumers; only raise it above the newest patch with a reason.
@@ -104,7 +109,7 @@ Go modules, no Makefile and no CI configuration. `go test ./...` runs the whole 
 
 ## Testing & QA
 
-- Run everything: `go test ./...` (34 tests, ~2 s) and `go test -race ./...`.
+- Run everything: `go test ./...` and `go test -race ./...` (the wrapper's suite adds ~10 s, more under `-race`).
 - Benchmarks live in `bench_test.go` and cover every row of the README's Performance table; run them with `go test -bench . -benchmem`. All of them use `b.Loop()`. Where per-iteration setup must be excluded from the measurement, stop the timer around the setup *inside* the body and leave it running at the end: `b.Loop` resets it on the first call (so setup before the loop is already excluded) and `StopTimer` poisons the loop on purpose if a body ends with it stopped. If a row of the table changes, the matching benchmark must change with it: the table must stay reproducible from `go test -bench .` alone.
 - The suite runs against a reference model, not mocks: `map[int]struct{}` for membership and `slices`/`maps` for the algebra.
 - Coverage is contractual, not structural. The fixed contracts are: every writer and reader against the zero value (`TestZeroValueWriters`, `TestZeroValueReaders`, `TestZeroValueSetAsArgument`), the full algebra against the model (`TestSetAlgebraMatchesModel`, `TestMutatorsMatchModel`), the `Copy`/`Clone` reservation contracts (`TestCopyAndCloneContracts`), `Rehash` landing on the smallest step (`TestRehashCompactsToSmallestStep`), `Difference` delivering an exactly-sized result (`TestDifferenceNeverOverAllocated`, `TestDifferenceDisjointKeepsStep`), self-operations (`TestSelfOperations`), the estimator still delivering on a step (`TestEstimatedSizingStillDeliversOnStep`), and the probe that sizes `Difference` (`TestDifferenceReservationTracksResult`, `TestDifferenceProbeDeliversExactResult`). Statement coverage is 100%; the tests that close the last branches are `TestNewFromSlicesCompactsOversizedHint`, `TestAddAllCompactsAfterResize`, `TestExtendProbeSkipsExistingElements`, `TestIntersectionProbeSeesAbsentElements` and `TestSampleCountExactUpToOverlapSample`.

@@ -85,14 +85,20 @@ for every hint up to 300,000.
   a step boundary or falls below 80% of a multi-table step's slots.
 - **No background work, no goroutines, no finalizers, no `unsafe`.** The type is
   a map header plus an `int`; no external dependencies.
+- **A concurrent wrapper ships alongside the lock-free type.** `SyncSet[T]`
+  wraps `Set` behind an internal `RWMutex` with the same API, and an operation
+  over several sets locks its operands in a global order, so aliased and
+  inverted-order calls cannot deadlock. See [Concurrency](#concurrency).
 
 ### Concurrency
 
-The set is **not** safe for concurrent use without external synchronisation, the
-same as a Go map. That is a deliberate design decision, not an omission.
+The lock-free `Set` is **not** safe for concurrent use without external
+synchronisation, the same as a Go map. That is a deliberate design decision, not
+an omission — `SyncSet` below is the packaged answer for callers that do share a
+set.
 
-An internal lock cannot be added without breaking the API and the performance
-guarantees, for three measured reasons:
+An internal lock cannot be added to `Set` without breaking the API and the
+performance guarantees, for three measured reasons:
 
 - **It would deadlock on self-operations.** `s.Extend(s)` and `s.Retain(s)`
   re-enter the receiver while it is locked. A non-recursive mutex blocks and a
@@ -106,8 +112,9 @@ guarantees, for three measured reasons:
 
   | Mechanism | Single-threaded | 32 goroutines |
   |---|---|---|
-  | lock-free (this package) | 3.5 ns | **0.26 ns** |
-  | caller-held `sync.RWMutex` | 10.4 ns | 38 ns |
+  | lock-free (this package) | 3.0 ns | **0.2 ns** |
+  | caller-held `sync.RWMutex` | 10.4 ns | 44 ns |
+  | `SyncSet` (this package) | 10.4 ns | 40 ns |
   | internal `sync.Mutex` | 10.7 ns | 150–246 ns |
   | `chan struct{}` of capacity 1 | 23.8 ns | 119–147 ns |
   | `atomic.Pointer` to an immutable snapshot | 3.6 ns | 0.27 ns |
@@ -117,10 +124,16 @@ guarantees, for three measured reasons:
   mutex with more machinery. An internal lock also serialises readers, which is
   exactly the workload sets face most often.
 
-A lock inside the type would also make every caller pay for concurrency they may
+Those three objections are why the lock lives in a **separate type**: `SyncSet`
+solves the first two (it locks operands in a global order instead of re-entering,
+and it holds the `Set` by value so `resize` never copies a lock) and accepts the
+third as the price of internal synchronisation. The plain type keeps the
+lock-free reads.
+
+A lock inside `Set` would also make every caller pay for concurrency they may
 not need, and still could not make a read-then-write sequence atomic: `Contains`
-followed by `Add` would remain a race, because the critical section has to span
-both calls.
+followed by `Add` remains a race, because the critical section has to span both
+calls.
 
 **Use a lock held by the caller instead**, which knows the access pattern:
 
@@ -144,10 +157,59 @@ If you need lock-free concurrent reads at scale, the shape that works is an
 immutable snapshot behind an `atomic.Pointer`, rebuilt copy-on-write for
 writes — the last row of the table above. It keeps reads as fast as the
 lock-free case, but writes become `O(n)` and reads observe a snapshot rather
-than the latest element. That is a different contract and belongs in a separate
-wrapper, not in this type.
+than the latest element.
+
+For the common case, the package ships that wrapper: **`SyncSet[T]`** is a `Set`
+behind an internal `RWMutex`, with the same API. Readers share the lock and run
+in parallel; writers exclude readers and each other.
+
+```go
+s := set.NewSync[int](16)
+s.AddAll(1, 2, 3)
+
+go s.Add(4)
+go s.Remove(1)
+s.Contains(2) // true
+```
+
+`SyncSet` exists next to `Set` rather than inside it because the plain type must
+stay lock-free: the cost is real (the table above) and callers that never share
+a set should not pay it. Wrapping the plain type is also what keeps the
+performance argument honest — `SyncSet` pays for the lock, `Set` does not, and
+nothing is hidden inside the hot paths of the type.
+
+The wrapper adds one thing the caller-held lock above cannot express: an
+operation over **several** sets takes all their locks at once, and it cannot
+deadlock. Every `SyncSet` gets a unique identity in construction order, and
+multi-set operations (`Extend`, `Retain`, `Subtract`, `Difference`, `IsSubset`,
+`Disjoint`, `Equal`, `SyncUnion`, `SyncIntersection`) acquire their operands in
+that identity order, collapsing repeated ones into a single lock:
+
+- **Aliasing is safe.** `s.Extend(s)`, `s.Retain(s)`, `s.Subtract(s)`,
+  `s.Extend(x, x)`, `s.Difference(s)` — a set is never locked twice by one call,
+  so a pending writer cannot wedge the second request. The result follows the
+  set algebra: extend and retain are identities, subtract empties.
+- **Inverted orders are safe.** `a.Extend(b)` racing `b.Extend(a)`, or two
+  goroutines running `a.Difference(b)` and `b.Difference(a)` while a writer
+  commits on each set: a goroutine holding locks can only wait for a lock with a
+  higher identity than every lock it already holds, so no wait cycle can close.
+
+The two methods that run caller code — the body of an `IterAll` loop and the
+sequence passed to `AddSeq` — hold the lock for their duration, exactly like
+`sync.Map.Range`. Neither may call a method of any `SyncSet`. To iterate and
+mutate, take the snapshot: `for _, v := range s.GetAll() { s.Add(v * 2) }`.
+
+A sequence of calls is not atomic; `Contains` followed by `Add` is still a
+read-then-write race, and that is what it is because the critical section would
+have to span both calls.
 
 ## API
+
+Every `Set` method and function below has a `SyncSet` counterpart of the same
+name and signature, where `*Set[T]` becomes `*SyncSet[T]` (`Union` and
+`Intersection` become `SyncUnion` and `SyncIntersection`). The tables describe
+the lock-free type; the wrapper differs only in the concurrency contract and in
+returning `*SyncSet` from `Copy`, `Clone` and `Difference`.
 
 ### Construction
 
@@ -156,6 +218,8 @@ wrapper, not in this type.
 | `New[T](hint int) *Set[T]` | Empty set with room for `hint` elements (clamped to at least 1). |
 | `NewFromSlices[T](lists ...[]T) *Set[T]` | Set of the distinct elements of all lists. Reserves for the total length and compacts if duplicates leave it below that step. |
 | `var s Set[T]` | Zero value: a usable empty set. |
+| `NewSync[T](hint int) *SyncSet[T]` | Concurrent wrapper over `New`; see [Concurrency](#concurrency). |
+| `NewSyncFromSlices[T](lists ...[]T) *SyncSet[T]` | Concurrent wrapper over `NewFromSlices`. |
 
 ### Adding
 
@@ -204,7 +268,8 @@ wrapper, not in this type.
 
 Both return sets that share no state with the source. The difference is the
 reservation: `Copy` trades growth headroom for memory, `Clone` trades memory for
-growth headroom.
+growth headroom. `SyncSet.Copy` and `SyncSet.Clone` return independent
+`*SyncSet` values, with their own lock and their own identity in the lock order.
 
 ## What a rebuild costs
 
@@ -243,12 +308,22 @@ indicative; benchmark on your own workload.
 | `IsSubset` / `Disjoint` | no allocation |
 | `GetAll` | one allocation (the result slice) |
 | `Difference` | one pass over the receiver, with the result map sized from a probe of the smaller operand (the upper bound when no step can be crossed): a tiny result out of a huge receiver no longer allocates a map of the receiver's size |
+| `SyncSet.Contains` | one `RLock` plus one map lookup, no allocation (10.4 ns single-threaded, 40 ns across 32 goroutines) |
+| `SyncSet.IsSubset` / `Disjoint` / `Equal` | no allocation: the two lock requests travel in a value, so the lock order does not allocate |
+| `SyncSet.Extend` / `Retain` / `Subtract` with one argument | no allocation beyond the operand's own work: the single-argument path takes the pair route |
 
 Hot loops range directly over the internal map rather than going through
 iterators, and results are pre-sized, so the common paths do not allocate beyond
 the container itself. `go test -bench .` runs the benchmarks in
-[`bench_test.go`](bench_test.go), which are the source of the numbers above and
-report them for your own machine.
+[`bench_test.go`](bench_test.go) and [`bench_sync_test.go`](bench_sync_test.go),
+which are the source of the numbers above and report them for your own machine;
+`go test -bench Sync` runs only the wrapper's.
+
+The wrapper's numbers come from the same harness as the lock-free ones, so the
+`SyncSet` row of the table above and the `Contains` row of the Performance table
+are directly comparable: the internal lock costs about 7 ns of the 10 ns
+single-threaded read, and readers still scale — 40 ns across 32 goroutines is
+the serialisation of the map probe, not of the lock.
 
 ## Why the probe samples 256 elements
 
@@ -401,7 +476,7 @@ any deviation — but the distribution should not be read as a guarantee.
 
 ```sh
 go test ./...          # behavioural suite, exhaustive algebra against a model
-go test -race ./...    # no shared state, but the suite is race-clean
+go test -race ./...    # the plain type shares nothing; the wrapper is race-clean
 go vet ./...
 go test -bench .       # the numbers quoted in "Performance" above
 ```
@@ -411,6 +486,15 @@ the zero value, the full algebra against a reference model, the `Copy`/`Clone`
 reservation contracts, `Rehash` landing on the smallest step, `Difference`
 delivering an exactly-sized result, and self-operations such as `s.Extend(s)`.
 The benchmarks in `bench_test.go` cover every row of the Performance table.
+
+`syncset_test.go` does the same for the wrapper: the algebra and the mutators
+against the model, the zero value through every writer and reader, `lockAll`
+sorting and collapsing its requests (which is the deadlock proof made
+executable), identity uniqueness and stability, and a concurrency section that
+runs the shapes which used to deadlock — self-operations, same operand twice,
+inverted argument orders, and a mixed workload over a pool of sets — under a
+budget so a regression fails as a hang with a name instead of as a stalled
+process. `go test -race` is what pins the read paths.
 
 `theoretical_slots_test.go` ties the reservation model to the runtime it models:
 it reads the real slot count out of a freshly made map (through the runtime's
