@@ -710,77 +710,23 @@ func TestSyncIteratorsAgree(t *testing.T) {
 	}
 }
 
-// --- lockPair ---------------------------------------------------------------
-
-// lockPair is the binary operations' shared path: it must order by identity,
-// collapse the aliased case into one lock, and never allocate.
-func TestSyncLockPairOrdersAndCollapses(t *testing.T) {
-	a, b := NewSync[int](0), NewSync[int](0)
-	if a.id >= b.id {
-		t.Fatalf("identities are not in construction order: %d, %d", a.id, b.id)
-	}
-
-	// Distinct sets: two requests in ascending identity order.
-	got := lockPair(a, false, b, false)
-	unlockPair(got)
-	if got.n != 2 || got.reqs[0].set != a || got.reqs[1].set != b {
-		t.Fatalf("lockPair(a, b) = %+v, want a then b", got)
-	}
-
-	// Passed the other way round, the order must not change.
-	got = lockPair(b, false, a, false)
-	unlockPair(got)
-	if got.n != 2 || got.reqs[0].set != a || got.reqs[1].set != b {
-		t.Fatalf("lockPair(b, a) = %+v, want a then b", got)
-	}
-
-	// Aliased: one lock, and a write request wins over a read one.
-	got = lockPair(a, true, a, false)
-	if got.n != 1 || got.reqs[0].set != a || !got.reqs[0].write {
-		t.Fatalf("lockPair(a,true,a,false) = %+v, want a single write on a", got)
-	}
-	unlockPair(got)
-	got = lockPair(a, false, a, true)
-	if got.n != 1 || got.reqs[0].set != a || !got.reqs[0].write {
-		t.Fatalf("lockPair(a,false,a,true) = %+v, want a single write on a", got)
-	}
-	unlockPair(got)
-	got = lockPair(a, false, a, false)
-	if got.n != 1 || got.reqs[0].set != a || got.reqs[0].write {
-		t.Fatalf("lockPair(a,false,a,false) = %+v, want a single read on a", got)
-	}
-	unlockPair(got)
-}
-
-// The binary predicates are documented as allocation-free, like their plain
-// counterparts: the two requests must not reach the heap. This is the one place
-// the wrapper spends a type on it (lockPair), because they are O(1) when they
-// fail early — Disjoint leaves on the first shared element — so a fixed
-// allocation would dominate them. The variadic operations are O(n) and take the
-// slice route instead.
-func TestSyncBinaryPredicatesDoNotAllocate(t *testing.T) {
-	a, b := NewSyncFromSlices(makeSeq(64)), NewSyncFromSlices(makeSeq(64))
-	if allocs := testing.AllocsPerRun(100, func() { _ = a.IsSubset(b) }); allocs != 0 {
-		t.Fatalf("IsSubset allocated %v times per run, want 0", allocs)
-	}
-	if allocs := testing.AllocsPerRun(100, func() { _ = a.Disjoint(b) }); allocs != 0 {
-		t.Fatalf("Disjoint allocated %v times per run, want 0", allocs)
-	}
-	if allocs := testing.AllocsPerRun(100, func() { _ = a.Equal(b) }); allocs != 0 {
-		t.Fatalf("Equal allocated %v times per run, want 0", allocs)
-	}
+// Contains is the only wrapper read that is documented as allocation-free: it
+// takes one lock and returns. The binary operations take the slice route, so
+// they allocate the request slice like the variadic ones do.
+func TestSyncContainsDoesNotAllocate(t *testing.T) {
+	a := NewSyncFromSlices(makeSeq(64))
 	if allocs := testing.AllocsPerRun(100, func() { _ = a.Contains(1) }); allocs != 0 {
 		t.Fatalf("Contains allocated %v times per run, want 0", allocs)
 	}
 }
 
-// The counterpoint, pinned so the asymmetry stays deliberate: the O(n)
-// operations take the slice route, so a one-argument call still allocates the
-// request slice. A re-added single-argument fast path would drop Extend and
-// Subtract to zero and fail here. Retain delegates to Intersection, which
-// rebuilds the map and allocates on its own account, so only a floor is
-// meaningful for it.
-func TestSyncVariadicOperationsTakeTheSliceRoute(t *testing.T) {
+// Every multi-set operation takes the slice route, so each one allocates the
+// request slice. Extend and Subtract would drop to zero if a single-argument
+// fast path came back, and the binary operations would drop to zero if a
+// pair special-case came back: both are pinned here. Retain delegates to
+// Intersection, which rebuilds the map and allocates on its own account, so
+// only a floor is meaningful for it.
+func TestSyncMultiSetOperationsTakeTheSliceRoute(t *testing.T) {
 	src := NewSyncFromSlices(makeSeq(1000))
 	dst := NewSync[int](0)
 
@@ -792,6 +738,20 @@ func TestSyncVariadicOperationsTakeTheSliceRoute(t *testing.T) {
 	}
 	if allocs := testing.AllocsPerRun(50, func() { dst.Retain(src) }); allocs < 1 {
 		t.Fatalf("Retain allocated %v times per run, want at least the request slice", allocs)
+	}
+
+	a, b := NewSyncFromSlices(makeSeq(64)), NewSyncFromSlices(makeSeq(64))
+	for _, tc := range []struct {
+		name string
+		run  func()
+	}{
+		{"IsSubset", func() { _ = a.IsSubset(b) }},
+		{"Disjoint", func() { _ = a.Disjoint(b) }},
+		{"Equal", func() { _ = a.Equal(b) }},
+	} {
+		if allocs := testing.AllocsPerRun(50, tc.run); allocs != 1 {
+			t.Fatalf("%s allocated %v times per run, want exactly the request slice", tc.name, allocs)
+		}
 	}
 }
 

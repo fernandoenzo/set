@@ -91,52 +91,6 @@ func unlockAll[T comparable](reqs []lockReq[T]) {
 	}
 }
 
-// pairReqs is the request set of the two-set operations: exactly two locks, so
-// it travels in a value and those operations allocate nothing.
-type pairReqs[T comparable] struct {
-	reqs [2]lockReq[T]
-	n    int
-}
-
-// lockPair is lockAll specialised to two sets, collapsing them into one lock
-// when they are the same. It returns a value, not a slice, so the binary
-// predicates stay allocation-free.
-func lockPair[T comparable](a *SyncSet[T], aw bool, b *SyncSet[T], bw bool) pairReqs[T] {
-	a.setID()
-	b.setID()
-	var out pairReqs[T]
-	if a == b {
-		out.n = 1
-		out.reqs[0] = lockReq[T]{set: a, write: aw || bw}
-	} else {
-		out.n = 2
-		out.reqs[0] = lockReq[T]{set: a, write: aw}
-		out.reqs[1] = lockReq[T]{set: b, write: bw}
-		if a.id > b.id {
-			out.reqs[0], out.reqs[1] = out.reqs[1], out.reqs[0]
-		}
-	}
-	for i := range out.n {
-		if out.reqs[i].write {
-			out.reqs[i].set.locker.Lock()
-		} else {
-			out.reqs[i].set.locker.RLock()
-		}
-	}
-	return out
-}
-
-// unlockPair releases the locks taken by lockPair, in reverse order.
-func unlockPair[T comparable](reqs pairReqs[T]) {
-	for i := reqs.n - 1; i >= 0; i-- {
-		if reqs.reqs[i].write {
-			reqs.reqs[i].set.locker.Unlock()
-		} else {
-			reqs.reqs[i].set.locker.RUnlock()
-		}
-	}
-}
-
 // lockWith acquires s (write when write) plus every set in others (read-only),
 // in the global lock order, and returns the acquisition for unlockAll.
 func (s *SyncSet[T]) lockWith(write bool, others ...*SyncSet[T]) []lockReq[T] {
@@ -226,8 +180,8 @@ func (s *SyncSet[T]) Retain(sets ...*SyncSet[T]) {
 
 // Difference returns s − other with the result on the step of its own length.
 func (s *SyncSet[T]) Difference(other *SyncSet[T]) *SyncSet[T] {
-	locks := lockPair(s, false, other, false)
-	defer unlockPair(locks)
+	locks := s.lockWith(false, other)
+	defer unlockAll(locks)
 	return newSync(s.set.Difference(&other.set))
 }
 
@@ -314,22 +268,22 @@ func (s *SyncSet[T]) IterSnapshot() iter.Seq[T] {
 
 // IsSubset reports whether every element of s is an element of other.
 func (s *SyncSet[T]) IsSubset(other *SyncSet[T]) bool {
-	locks := lockPair(s, false, other, false)
-	defer unlockPair(locks)
+	locks := s.lockWith(false, other)
+	defer unlockAll(locks)
 	return s.set.IsSubset(&other.set)
 }
 
 // Disjoint reports whether s and other share no element.
 func (s *SyncSet[T]) Disjoint(other *SyncSet[T]) bool {
-	locks := lockPair(s, false, other, false)
-	defer unlockPair(locks)
+	locks := s.lockWith(false, other)
+	defer unlockAll(locks)
 	return s.set.Disjoint(&other.set)
 }
 
 // Equal reports whether s and other hold the same elements.
 func (s *SyncSet[T]) Equal(other *SyncSet[T]) bool {
-	locks := lockPair(s, false, other, false)
-	defer unlockPair(locks)
+	locks := s.lockWith(false, other)
+	defer unlockAll(locks)
 	return s.set.Equal(&other.set)
 }
 
