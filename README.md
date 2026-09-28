@@ -322,8 +322,8 @@ indicative; benchmark on your own workload.
 | `GetAll` | one allocation (the result slice) |
 | `Difference` | one pass over the receiver, with the result map sized from a probe of the smaller operand (the upper bound when no step can be crossed): a tiny result out of a huge receiver no longer allocates a map of the receiver's size |
 | `SyncSet.Contains` | one `RLock` plus one map lookup, no allocation (10.4 ns single-threaded, 40 ns across 32 goroutines) |
-| `SyncSet.IsSubset` / `Disjoint` / `Equal` | no allocation: the two lock requests travel in a value, so the lock order does not allocate |
-| `SyncSet.Extend` / `Retain` / `Subtract` with one argument | no allocation beyond the operand's own work: the single-argument path takes the pair route |
+| `SyncSet.IsSubset` / `Disjoint` / `Equal` | no allocation: the two lock requests travel in a value (`lockPair`). These are `O(1)` when they fail early — `Disjoint` exits on the first shared element — so a fixed allocation would dominate them |
+| `SyncSet.Extend` / `Retain` / `Subtract` | one small slice for the lock requests. They are `O(n)` over map contents, so a fixed ~30 ns of allocation does not show; the one-argument fast path that avoided it bought nothing measurable and was dropped |
 | `SyncSet.IterSnapshot` | one clone, then a lock-free loop; it clones because `Clone` memmoves the groups instead of reinserting every element, which `Copy` would do |
 
 Hot loops range directly over the internal map rather than going through

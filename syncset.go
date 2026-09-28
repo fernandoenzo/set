@@ -209,12 +209,6 @@ func (s *SyncSet[T]) Extend(sets ...*SyncSet[T]) {
 	if len(sets) == 0 {
 		return
 	}
-	if len(sets) == 1 {
-		locks := lockPair(s, true, sets[0], false)
-		defer unlockPair(locks)
-		s.set.Extend(&sets[0].set)
-		return
-	}
 	locks := s.lockWith(true, sets...)
 	defer unlockAll(locks)
 	s.set.Extend(innersOf(sets)...)
@@ -223,12 +217,6 @@ func (s *SyncSet[T]) Extend(sets ...*SyncSet[T]) {
 // Retain keeps, in place, the elements present in every set.
 func (s *SyncSet[T]) Retain(sets ...*SyncSet[T]) {
 	if len(sets) == 0 {
-		return
-	}
-	if len(sets) == 1 {
-		locks := lockPair(s, true, sets[0], false)
-		defer unlockPair(locks)
-		s.set.Retain(&sets[0].set)
 		return
 	}
 	locks := s.lockWith(true, sets...)
@@ -246,12 +234,6 @@ func (s *SyncSet[T]) Difference(other *SyncSet[T]) *SyncSet[T] {
 // Subtract deletes, in place, the elements of the given sets.
 func (s *SyncSet[T]) Subtract(sets ...*SyncSet[T]) {
 	if len(sets) == 0 {
-		return
-	}
-	if len(sets) == 1 {
-		locks := lockPair(s, true, sets[0], false)
-		defer unlockPair(locks)
-		s.set.Subtract(&sets[0].set)
 		return
 	}
 	locks := s.lockWith(true, sets...)

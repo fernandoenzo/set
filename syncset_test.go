@@ -753,7 +753,11 @@ func TestSyncLockPairOrdersAndCollapses(t *testing.T) {
 }
 
 // The binary predicates are documented as allocation-free, like their plain
-// counterparts: the two requests must not reach the heap.
+// counterparts: the two requests must not reach the heap. This is the one place
+// the wrapper spends a type on it (lockPair), because they are O(1) when they
+// fail early — Disjoint leaves on the first shared element — so a fixed
+// allocation would dominate them. The variadic operations are O(n) and take the
+// slice route instead.
 func TestSyncBinaryPredicatesDoNotAllocate(t *testing.T) {
 	a, b := NewSyncFromSlices(makeSeq(64)), NewSyncFromSlices(makeSeq(64))
 	if allocs := testing.AllocsPerRun(100, func() { _ = a.IsSubset(b) }); allocs != 0 {
@@ -767,6 +771,27 @@ func TestSyncBinaryPredicatesDoNotAllocate(t *testing.T) {
 	}
 	if allocs := testing.AllocsPerRun(100, func() { _ = a.Contains(1) }); allocs != 0 {
 		t.Fatalf("Contains allocated %v times per run, want 0", allocs)
+	}
+}
+
+// The counterpoint, pinned so the asymmetry stays deliberate: the O(n)
+// operations take the slice route, so a one-argument call still allocates the
+// request slice. A re-added single-argument fast path would drop Extend and
+// Subtract to zero and fail here. Retain delegates to Intersection, which
+// rebuilds the map and allocates on its own account, so only a floor is
+// meaningful for it.
+func TestSyncVariadicOperationsTakeTheSliceRoute(t *testing.T) {
+	src := NewSyncFromSlices(makeSeq(1000))
+	dst := NewSync[int](0)
+
+	if allocs := testing.AllocsPerRun(50, func() { dst.Extend(src) }); allocs != 1 {
+		t.Fatalf("Extend allocated %v times per run, want exactly the request slice", allocs)
+	}
+	if allocs := testing.AllocsPerRun(50, func() { dst.Subtract(src) }); allocs != 1 {
+		t.Fatalf("Subtract allocated %v times per run, want exactly the request slice", allocs)
+	}
+	if allocs := testing.AllocsPerRun(50, func() { dst.Retain(src) }); allocs < 1 {
+		t.Fatalf("Retain allocated %v times per run, want at least the request slice", allocs)
 	}
 }
 
