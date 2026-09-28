@@ -10,17 +10,15 @@ import (
 
 // SyncSet is a Set with an internal RWMutex: readers share it, writers exclude
 // readers and each other. The plain Set stays lock-free for callers that never
-// share it.
+// share it, and must not be copied after first use. The zero value is a usable
+// empty set; a nil *SyncSet is not.
 //
-// Operations over several sets take their locks in ascending identity order, so
-// the argument order is irrelevant and aliasing is safe: s.Extend(s),
-// s.Extend(x, x), s.Difference(s) and a.Extend(b) racing b.Extend(a) all work.
+// Multi-set operations take their locks in ascending identity order, so the
+// argument order is irrelevant, aliasing is safe and no wait cycle can close.
+// See README, "Concurrency".
 //
-// IterAll and AddSeq run the caller's code under the lock, like sync.Map.Range;
-// that code must not call a SyncSet method. Use IterSnapshot or GetAll.
-//
-// The zero value is a usable empty set. A nil *SyncSet is not usable, and a
-// SyncSet must not be copied after first use.
+// IterAll and AddSeq run the caller's code under the lock: it must not call any
+// SyncSet method. Use IterSnapshot or GetAll.
 type SyncSet[T comparable] struct {
 	set    Set[T]
 	locker sync.RWMutex
@@ -47,10 +45,7 @@ type lockReq[T comparable] struct {
 
 // lockAll acquires every request in ascending identity order, collapsing
 // repeats into one lock (a write request winning over a read one), and returns
-// them in acquisition order for unlockAll. The order is what rules out wait
-// cycles; the collapse is what makes s.Difference(s) safe.
-//
-// It takes ownership of reqs.
+// them in acquisition order for unlockAll. It takes ownership of reqs.
 func lockAll[T comparable](reqs []lockReq[T]) []lockReq[T] {
 	for i := range reqs {
 		reqs[i].set.setID()
@@ -94,10 +89,10 @@ func unlockAll[T comparable](reqs []lockReq[T]) {
 // lockWith acquires s (write when write) plus every set in others (read-only),
 // in the global lock order, and returns the acquisition for unlockAll.
 func (s *SyncSet[T]) lockWith(write bool, others ...*SyncSet[T]) []lockReq[T] {
-	reqs := make([]lockReq[T], 0, len(others)+1)
-	reqs = append(reqs, lockReq[T]{set: s, write: write})
-	for _, other := range others {
-		reqs = append(reqs, lockReq[T]{set: other})
+	reqs := make([]lockReq[T], len(others)+1)
+	reqs[0] = lockReq[T]{set: s, write: write}
+	for i, other := range others {
+		reqs[i+1] = lockReq[T]{set: other}
 	}
 	return lockAll(reqs)
 }
@@ -242,7 +237,7 @@ func (s *SyncSet[T]) GetAll() []T {
 }
 
 // IterAll returns the elements as an iterator. The loop body runs under s's
-// read lock, like sync.Map.Range, and must not call any SyncSet method.
+// read lock, like sync.Map.Range.
 func (s *SyncSet[T]) IterAll() iter.Seq[T] {
 	return func(yield func(T) bool) {
 		s.locker.RLock()
@@ -296,9 +291,9 @@ func SyncUnion[T comparable](sets ...*SyncSet[T]) *SyncSet[T] {
 
 // SyncIntersection returns the elements present in every set.
 func SyncIntersection[T comparable](sets ...*SyncSet[T]) *SyncSet[T] {
-	reqs := make([]lockReq[T], 0, len(sets))
-	for _, other := range sets {
-		reqs = append(reqs, lockReq[T]{set: other})
+	reqs := make([]lockReq[T], len(sets))
+	for i, other := range sets {
+		reqs[i] = lockReq[T]{set: other}
 	}
 	locks := lockAll(reqs)
 	defer unlockAll(locks)
