@@ -4,7 +4,7 @@
 
 `set` is a generic Go package exposing `Set[T comparable]`, an unordered set of comparable values backed by a `map[T]struct{}` that keeps its memory proportional to the number of elements it holds — including after large deletions. Go maps grow on insert and never shrink on delete, so the set rebuilds its map ("rehash") when a deletion has fallen far enough for the rebuild to pay off. The rules are derived, not tuned: `docs/set-rehash-en.md` models Go's Swiss-table runtime exactly and proves that after a rebuild the expected extra memory stays below 0.4% of the capacity step.
 
-The zero value (`var s set.Set[T]`) is a usable empty set; the map is created by the first write. A nil `*Set` is not usable. `SyncSet[T]` (`syncset.go`) wraps the same type behind an `RWMutex` for callers that do share a set; the plain type stays lock-free. There are no external dependencies.
+The zero value (`var s set.Set[T]`) is a usable empty set; the map is created by the first write. A nil `*Set` is not usable. `SyncSet[T]` (`syncset.go`) wraps the same type behind an `RWMutex` for callers that do share a set; `ShardedSyncSet[T]` (`sharded_syncset.go`) splits the same wrapper across `shardCount` independent shards for contended reads. The plain type stays lock-free. There are no external dependencies.
 
 ## Architecture & Data Flow
 
@@ -29,7 +29,8 @@ Four layers:
 2. **Reservation model** (`theoreticalSlots`, `pow2ceil`, `hintOversized`): mirrors the runtime's sizing — `target = hint*8/7`, a power-of-two directory of `ceil(target/1024)` entries and power-of-two tables of `target/dir` slots (at least 8). The rounding can leave the usable budget (7/8 of the slots) below the hint; those cracks are what `hintOversized` detects.
 3. **Trigger rule** (`needsRehash`): fires on threshold *crossings*, not zones, so each capacity step is rebuilt at most once per monotone descent.
 4. **Probe estimator** (`sampleCount`, `overlapSample`): `Extend`, `Intersection` and `Difference` cannot know their result size, so they size the map from a 256-element sample of an operand and let `compact()` correct a bad estimate with a rebuild — the estimate decides how much work is done, never what the set contains.
-5. **Concurrency wrapper** (`syncset.go`): `SyncSet[T]` holds a `Set` by value plus an `RWMutex` and an identity. Single-set methods take the lock in the obvious mode; multi-set methods go through `lockAll`, which sorts the requested locks by identity and collapses repeats, so aliased and inverted-order operands cannot deadlock.
+5. **Concurrency wrappers** (`syncset.go`, `sharded_syncset.go`): `SyncSet[T]` holds a `Set` by value plus an `RWMutex` and an identity. Single-set methods take the lock in the obvious mode; multi-set methods go through `lockAll`, which sorts the requested locks by identity and collapses repeats, so aliased and inverted-order operands cannot deadlock. `ShardedSyncSet[T]` is the same contract with the storage split across `shardCount` shards, each with its own `RWMutex` and `Set`; its `lockShards` sorts sets by the same identities and takes each set's shards as one contiguous block of that order, which is what keeps the order total.
+6. **Shard layout** (`sharded_syncset.go`): `shardIndex` hashes a value with one process-wide `maphash` seed, so a value's shard is a pure function of the value and shard *i* of one set holds the same values as shard *i* of another. Every multi-set operation decomposes shard by shard on that invariant and delegates to the plain `Set` core.
 
 ## Key Directories
 
@@ -44,7 +45,7 @@ Four layers:
 # Run the behavioural suite
 go test ./...
 
-# Same suite under the race detector (the plain type shares nothing; SyncSet must be clean)
+# Same suite under the race detector (the plain type shares nothing; both wrappers must be clean)
 go test -race ./...
 
 # Verbose output
@@ -68,11 +69,13 @@ Go modules, no Makefile and no CI configuration. `go test ./...` runs the whole 
 - **Constants over literals**: `overlapSample` (256) is named and derived in the README; never inline the sample size.
 - **Self-operations must stay valid**: `s.Extend(s)`, `s.Retain(s)`, `s.Subtract(s)` and zero-valued arguments are in scope, and `resize` replaces the receiver wholesale (`*s = *rebuilt`) — which is why `Set` carries no lock (it would be copied by that assignment) and why `SyncSet` holds its `Set` by value and never re-enters a lock it holds. `lockAll` collapses repeats, so `s.Extend(s)` locks `s` once.
 - **No background work**: no goroutines, no finalizers, no `unsafe`. Keep it that way. `SyncSet` gets its lock order from a counter (`lastID`/`setID`), not from pointer addresses, precisely to avoid `unsafe` and to stay reproducible.
-- **Lock order is the deadlock proof**: every `SyncSet` has an identity assigned in construction order, and `lockAll` sorts requests by it and collapses repeats. Never take a `SyncSet` lock outside `lockAll`; never call a public `SyncSet` method while holding one (it would re-enter). When the loop body touches a set, use `IterSnapshot`, never `IterAll`.
+- **Lock order is the deadlock proof**: every `SyncSet` and `ShardedSyncSet` has an identity assigned in construction order, and `lockAll`/`lockShards` sort requests by it and collapse repeats. Never take a wrapper lock outside those helpers; never call a public wrapper method while holding one (it would re-enter). When the loop body touches a set, use `IterSnapshot`, never `IterAll`.
+- **The shard layout is an invariant, not a detail**: `shardIndex` must stay a pure function of the value with a single process-wide seed. Changing it to a per-set seed, or to a different hash per set, silently breaks every multi-set operation of `ShardedSyncSet` — the shard pairs would no longer hold the same values. `TestShardIndexIsPerValue` pins it. The shard count is a package constant for the same reason: all sets must agree on where a value lives.
+- **Every shard has a counter that every mutation must maintain**: `shard.count` is what makes `Len` a sum of atomic loads instead of a 64-mutex walk. Insert and remove update it from the map's own length; bulk mutations reconcile it with `bulkLocked`; construction paths that write into the shard maps directly call `reconcileCounts`. `assertShardMatches` checks the invariant on every assertion, so a path that forgets it fails loudly instead of making `Len` wrong.
 - **A transient copy takes `Clone`, not `Copy`**: `Clone` memmoves the runtime's groups without rehashing, `Copy` reinserts every element (`~2-4×` slower, widening with the count — see `BenchmarkCloneVsCopy`).
 - **Every multi-set operation takes the same slice route**: `lockWith` + `lockAll` build one `[]lockReq[T]` per call, ordered and collapsed by identity. A value-typed pair specialisation (`pairReqs`) once kept the binary predicates allocation-free; it was measured at ~40 ns against ~35 ns of allocation for `Disjoint` and removed for the shared path. Every multi-set call allocates exactly that one request slice, so never add a "no allocation" claim for one of them — `TestSyncMultiSetOperationsTakeTheSliceRoute` pins the count.
 - **Iteration is unordered**: never let a public result depend on map iteration order (`GetAll` documents it, `Union`/`Intersection` build from ranges).
-- **Table-driven tests with a reference model**: `TestSetAlgebraMatchesModel` checks every ordered pair of subsets of `{0,1,2}` against `map[int]struct{}`; `TestMutatorsMatchModel` runs 200 seeded random trials against the same model. `syncset_test.go` mirrors both (`TestSyncSetAlgebraMatchesModel`, `TestSyncMutatorsMatchModel`) plus the zero-value, self-operation and concurrency contracts. New behaviour goes into that model comparison, not into ad-hoc assertions.
+- **Table-driven tests with a reference model**: `TestSetAlgebraMatchesModel` checks every ordered pair of subsets of `{0,1,2}` against `map[int]struct{}`; `TestMutatorsMatchModel` runs 200 seeded random trials against the same model. `syncset_test.go` mirrors both (`TestSyncSetAlgebraMatchesModel`, `TestSyncMutatorsMatchModel`) plus the zero-value, self-operation and concurrency contracts; `sharded_syncset_test.go` does the same for `ShardedSyncSet` (`TestShardSetAlgebraMatchesModel`, `TestShardMutatorsMatchModel`, `TestShardSetAlgebraAcrossAllShards`). New behaviour goes into that model comparison, not into ad-hoc assertions.
 - **Concurrency tests have a budget**: `mustFinish` fails a concurrency test that does not return within its budget, so a regression names the shape that deadlocked instead of stalling the package until the go test timeout. Do not compare values measured by two separate lock acquisitions (`s.Len()` against `s.GetAll()`): a writer may commit between them, and that is the documented contract, not a bug.
 - **Seeded randomness**: `rand.New(rand.NewPCG(0xC0FFEE, 0xBEEF))` — deterministic trials, no flaky runs.
 - **Helpers stay unexported and prefixed by role**: `modelOf`, `setOf`, `assertMatches`, `assertSyncMatches`, `makeSeq`, `disjointSeq`, `extendOf`, `mustFinish`.
@@ -84,6 +87,9 @@ Go modules, no Makefile and no CI configuration. `go test ./...` runs the whole 
 | `set.go` | The entire package: `Set[T]`, `New`, `NewFromSlices`, every method, `Union`, `Intersection`, `sampleCount`, `theoreticalSlots`, `needsRehash`, `needsFreshMap`, `hintOversized` |
 | `set_test.go` | The behavioural suite: 34 tests, exhaustive algebra against a model |
 | `syncset.go` | `SyncSet[T]`: the concurrent wrapper — `lockAll`/`unlockAll`, `lockWith`, `setID`, `IterSnapshot`, and one method per `Set` method |
+| `sharded_syncset.go` | `ShardedSyncSet[T]`: the sharded wrapper — `shardCount`, `shardIndex`, `shard`, `lockShards`/`unlockShards`, `ToSet`, and one method per `Set` method |
+| `sharded_syncset_test.go` | The sharded wrapper's suite: model comparison, shard-layout invariant, zero value, self-operations, inverted orders, iterator contracts, counters |
+| `sharded_syncset_bench_test.go` | The sharded wrapper's benchmarks, plus `TestShardScalingTable`, which prints the scaling the README quotes |
 | `syncset_test.go` | The wrapper's suite: the same model comparisons, the zero-value and self-operation contracts, the iterator contracts, and the deadlock shapes under a budget |
 | `theoretical_slots_test.go` | Reads the runtime's real slot count (behind `unsafe`) and checks `theoreticalSlots` against it; the only tie between the model and the runtime |
 | `bench_test.go` | The benchmarks behind the README's Performance table (`go test -bench .`) |
@@ -98,7 +104,7 @@ Go modules, no Makefile and no CI configuration. `go test ./...` runs the whole 
 
 - **Language**: Go 1.27 — the `go` directive in `go.mod` pins the newest available patch (currently `1.27.1`); bump it when a new patch ships.
 - **Dependencies**: none. Standard library only (`iter`, `maps`, `slices`, `math/bits` in `set.go`; `cmp`, `iter`, `slices`, `sync`, `sync/atomic` in `syncset.go`; `math/rand/v2`, `slices`, `sync`, `testing` in the suites). No `go.sum`, no mocking library, no assertion library.
-- **API shape**: generics only (`Set[T comparable]`, `SyncSet[T comparable]`), pointer receiver for every mutator and reader, free functions (`Union`, `Intersection`, `SyncUnion`, `SyncIntersection`) for the operations that need no receiver. `SyncSet` mirrors the `Set` surface method for method, so the two stay comparable.
+- **API shape**: generics only (`Set[T comparable]`, `SyncSet[T comparable]`, `ShardedSyncSet[T comparable]`), pointer receiver for every mutator and reader, free functions (`Union`, `Intersection`, `SyncUnion`, `SyncIntersection`, `ShardedUnion`, `ShardedIntersection`) for the operations that need no receiver. Both wrappers mirror the `Set` surface method for method, so the three stay comparable.
 - **Docs are bilingual**: `docs/set-rehash-en.md` and `docs/set-rehash-es.md` are the same argument in two languages; a change to one is a change to both.
 - **Published versions live in the tags**: the released versions are the repository's tags (`git tag -l`), and neither this file nor the README names one. A version written down here goes stale on the next release, and the tags are already the record.
 - **The `go` directive is a consumer requirement**: it gates download, not only the local toolchain, so a `go 1.27.1` module makes older toolchains fetch a newer one or fail. Raising it is a breaking change for consumers; only raise it above the newest patch with a reason.

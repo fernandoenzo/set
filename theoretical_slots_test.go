@@ -71,6 +71,24 @@ func usable(t *testing.T) {
 // TestRuntimeLayoutReadable guards the test below against the runtime changing
 // shape: those two hints are known to reserve a single group, so if they no
 // longer read as 8 the reader — not the model — is what is out of date.
+// The shard padding is what keeps two shards off one cache line: without it a
+// write to one shard would invalidate the other's copy in every core, which is
+// the cost ShardedSyncSet exists to avoid. Go has no alignment directive, so
+// the size is the most this file can pin; the base address is up to the
+// allocator. This is the only file allowed to import unsafe.
+func TestShardSizeIsOneCacheLine(t *testing.T) {
+	var s shard[int]
+	if got := int(unsafe.Sizeof(s)); got != 64 {
+		t.Fatalf("shard[int] is %d bytes, want 64: neighbouring shards would share a cache line", got)
+	}
+	// The zero value must not be larger than a shard: the type's own state is
+	// the array of shards plus the identity.
+	var set ShardedSyncSet[int]
+	if base := int(unsafe.Sizeof(s)) * shardCount; int(unsafe.Sizeof(set)) < base {
+		t.Fatalf("ShardedSyncSet is %d bytes, smaller than its %d shards", unsafe.Sizeof(set), base)
+	}
+}
+
 func TestRuntimeLayoutReadable(t *testing.T) {
 	usable(t)
 	for _, hint := range []int{1, 8} {

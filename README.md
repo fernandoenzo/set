@@ -26,6 +26,7 @@ There are no dependencies to pull in.
 - [The problem it solves](#the-problem-it-solves)
 - [Guarantees](#guarantees)
   - [Concurrency](#concurrency)
+  - [Sharding](#sharding)
 - [API](#api)
   - [Construction](#construction)
   - [Adding](#adding)
@@ -89,6 +90,10 @@ for every hint up to 300,000.
   wraps `Set` behind an internal `RWMutex` with the same API, and an operation
   over several sets locks its operands in a global order, so aliased and
   inverted-order calls cannot deadlock. See [Concurrency](#concurrency).
+- **A sharded wrapper for contended reads.** `ShardedSyncSet[T]` is the same
+  idea with the set split across 64 shards, each with its own `RWMutex`. It
+  removes the throughput ceiling of a single lock word: 5.3 ns per read across
+  32 goroutines against `SyncSet`'s 37.9 ns. See [Sharding](#sharding).
 
 ### Concurrency
 
@@ -215,6 +220,89 @@ A sequence of calls is not atomic; `Contains` followed by `Add` is still a
 read-then-write race, and that is what it is because the critical section would
 have to span both calls.
 
+### Sharding
+
+`SyncSet` has a throughput **ceiling**, not a scaling curve. `RWMutex.RLock` and
+`RUnlock` each do an atomic add/subtract on `readerCount`, so every read writes
+the lock word; that word shares a cache line with the semaphore fields, and 32
+readers bounce the line between cores instead of reading in parallel. Measured
+on an i9-14900KF with a 10,000-element set:
+
+| Mechanism | 1 goroutine | 32 goroutines | Scaling |
+|---|---|---|---|
+| lock-free `Contains` (this package) | 4.8 ns | 0.4 ns | 12× |
+| bare `sync.RWMutex` (no map at all) | 8.0 ns | 24.9 ns | **0.3×** |
+| `SyncSet.Contains` | 11.0 ns | 39.2 ns | **0.3×** |
+| `ShardedSyncSet.Contains` | 13.0 ns | 5.3 ns | **2.4×** |
+
+The bare `RWMutex` row is what identifies the cause: it reproduces the `SyncSet`
+number with no map behind it, so the cost is the lock's own atomic writes.
+
+`ShardedSyncSet` splits the set into `shardCount` (64) independent shards, each
+with its own `RWMutex` and its own `Set`. A read touches one shard, so the
+atomic writes land on 64 different cache lines instead of one. The trade is
+explicit: **7.4× the read throughput of `SyncSet` across 32 goroutines, for
+1.2× worse single-threaded reads** at n = 10,000 (1.7× at n = 10), and 1.2–2.1×
+the memory, since the set now carries 64 locks: 59 B/element against 37 at
+n = 1,000, 62 against 30 at n = 10,000, 50 against 38 at n = 1,000,000.
+
+**The shard count trades read scaling against every whole-set operation**, and
+the curve was measured on this implementation, not on the prototype it came
+from:
+
+| Shards | Read, 32 goroutines | `IsSubset`, n = 100 | `Add` of a new value |
+|---|---|---|---|
+| 32 | 8.0 ns | 1.9 µs | 113 ns |
+| **64** | **5.2 ns** | **2.7 µs** | **98 ns** |
+| 128 | 3.4 ns | 4.6 µs | 104 ns |
+| 256 | 2.6 ns | 7.2 µs | 112 ns |
+
+Reads improve monotonically with the shard count, but every operation that must
+hold the whole set pays it in lock acquisitions, and `Add` of a new value is
+best in the middle. 64 is the balance: 32 shards leave throughput on the table,
+and 256 doubles the read rate while costing 2.6× on the whole-set path for a
+2.0× read gain. The count is a package constant rather than per-set because
+every multi-set operation decomposes shard by shard — see below.
+
+**Correctness rests on one invariant**: a value's shard is a pure function of
+the value (`shardIndex` uses a single process-wide `maphash` seed), so shard *i*
+of one set holds exactly the same values as shard *i* of another. That is what
+lets `Extend`, `Retain`, `Subtract`, `Difference`, `IsSubset`, `Disjoint`,
+`Equal`, `ShardedUnion` and `ShardedIntersection` run as the corresponding `Set`
+operation applied to each pair of shards, reusing the whole tested core instead
+of reimplementing the algebra under locks.
+
+What the design costs, measured at n = 10,000:
+
+| Operation | `SyncSet` | `ShardedSyncSet` | |
+|---|---|---|---|
+| `Contains` parallel, 32 goroutines | 39.2 ns | **5.3 ns** | 7.4× better |
+| `Add` of a value already present, parallel | 135.6 ns | **42.5 ns** | 3.2× better |
+| `Add` of a new value | 81 ns | 98 ns | 1.2× worse |
+| `IsSubset` | 79.7 µs | 78.2 µs | parity |
+| `Len` | 8.5 ns | 25.6 ns | 3× worse |
+| `GetAll` | 268.7 µs | **202.1 µs** | 1.3× better |
+
+`Add` reads the shard under the read lock first and only takes the write lock
+when the element is absent — the same shape xsync gives `LoadOrStore`, and the
+reason a contended re-`Add` costs a read. `Len` is exact without a lock, because
+every mutation keeps its shard's counter; a sum of 64 atomic loads beats
+locking 64 mutexes by 17×.
+
+**The one caveat**: operations that touch every shard cost the shard count.
+`Len` and `GetAll` take all 64 read locks (the first is avoided by the counters,
+the second is inherent), and the multi-set comparisons do too. For sets of a few
+hundred elements that fixed cost dominates: at n = 100, `IsSubset` costs 2.7 µs
+against `SyncSet`'s 0.7 µs. At n = 10,000 the two are equal. **The sharded type
+wins on reads at every size — including n = 10, where it reads at 10.7 ns
+against `SyncSet`'s 43.2 ns across 32 goroutines — but if a workload compares or
+mutates many small sets, `SyncSet` is the better choice.**
+
+`IterAll` holds all 64 read locks for the whole loop, so its body must not call
+any method of a `ShardedSyncSet`. Use `IterSnapshot` to iterate while touching
+the set, or `ToSet` to merge the shards into a plain `Set` when a whole-set
+operation is needed without holding shard locks.
+
 ## API
 
 Every `Set` method and function below has a `SyncSet` counterpart of the same
@@ -222,6 +310,12 @@ name and signature, where `*Set[T]` becomes `*SyncSet[T]` (`Union` and
 `Intersection` become `SyncUnion` and `SyncIntersection`). The tables describe
 the lock-free type; the wrapper differs only in the concurrency contract and in
 returning `*SyncSet` from `Copy`, `Clone` and `Difference`.
+
+`ShardedSyncSet` mirrors that same surface, with `NewShardedSync`,
+`NewShardedSyncFromSlices`, `ShardedUnion` and `ShardedIntersection` as its
+counterparts of the free functions, plus `ToSet`, which merges the shards into a
+plain `Set`. See [Sharding](#sharding) for when it is the right choice and for
+the operations where it is slower.
 
 ### Construction
 
@@ -232,6 +326,8 @@ returning `*SyncSet` from `Copy`, `Clone` and `Difference`.
 | `var s Set[T]` | Zero value: a usable empty set. |
 | `NewSync[T](hint int) *SyncSet[T]` | Concurrent wrapper over `New`; see [Concurrency](#concurrency). |
 | `NewSyncFromSlices[T](lists ...[]T) *SyncSet[T]` | Concurrent wrapper over `NewFromSlices`. |
+| `NewShardedSync[T](hint int) *ShardedSyncSet[T]` | Sharded wrapper: `hint/shardCount` per shard. See [Sharding](#sharding). |
+| `NewShardedSyncFromSlices[T](lists ...[]T) *ShardedSyncSet[T]` | Sharded wrapper over `NewFromSlices`, distributing each element to its shard. |
 
 ### Adding
 
@@ -254,6 +350,7 @@ returning `*SyncSet` from `Copy`, `Clone` and `Difference`.
 | `IsSubset(other *Set[T]) bool` | Every element of `s` is in `other`. |
 | `Disjoint(other *Set[T]) bool` | No shared element. |
 | `Equal(other *Set[T]) bool` | Same elements. |
+| `ToSet() *Set[T]` | (`ShardedSyncSet` only.) Merge every shard into a new plain `Set`, to escape to the lock-free type. |
 
 ### Removing
 
@@ -271,6 +368,7 @@ returning `*SyncSet` from `Copy`, `Clone` and `Difference`.
 | `Union(sets ...*Set[T]) *Set[T]` | Elements of every set. |
 | `Intersection(sets ...*Set[T]) *Set[T]` | Elements present in every set. |
 | `Difference(other *Set[T]) *Set[T]` | `s − other`. |
+| `ShardedUnion` / `ShardedIntersection` | The sharded counterparts of `Union` and `Intersection`. |
 
 ### Copies
 
@@ -336,8 +434,29 @@ which are the source of the numbers above and report them for your own machine;
 The wrapper's numbers come from the same harness as the lock-free ones, so the
 `SyncSet` row of the table above and the `Contains` row of the Performance table
 are directly comparable: the internal lock costs about 7 ns of the 10 ns
-single-threaded read, and readers still scale — 40 ns across 32 goroutines is
-the serialisation of the map probe, not of the lock.
+single-threaded read.
+
+That cost is a **throughput ceiling, not a scaling one**, and the row above
+should not be read as "readers still scale". `sync.RWMutex.RLock` and `RUnlock`
+each do an atomic add/subtract on `readerCount`, so every read *writes* the lock
+word; that word shares one cache line with the semaphore fields, and 32 readers
+bounce the line between cores instead of reading in parallel. The ceiling this
+puts on `SyncSet` is 32× lower than the map underneath it:
+
+| Mechanism | 1 goroutine | 32 goroutines | Scaling |
+|---|---|---|---|
+| lock-free `Contains` (this package) | 4.8 ns | 0.4 ns | 12× |
+| bare `sync.RWMutex` (no map at all) | 8.0 ns | 24.9 ns | **0.3×** |
+| `SyncSet.Contains` (this package) | 11.1 ns | 42.5 ns | **0.3×** |
+| `ConcurrentHashSet` (`xsync.MapOf`, lock-free reads) | 5.9 ns | 0.5 ns | 12× |
+
+The bare `RWMutex` row is the proof: it reproduces the `SyncSet` number with no
+map behind it, so the cost is the lock's own atomic writes and not the probe.
+`SyncSet` loses ~4× the single-threaded throughput once readers contend; a
+`RWMutex` wrapper is therefore a good trade only when reads are not the
+contended path — for genuinely read-heavy sharing, an `atomic.Pointer` to an
+immutable snapshot or a table with per-bucket locks both do better, which is
+what the `ConcurrentHashSet` row measures.
 
 ## Why the probe samples 256 elements
 
@@ -493,6 +612,8 @@ go test ./...          # behavioural suite, exhaustive algebra against a model
 go test -race ./...    # the plain type shares nothing; the wrapper is race-clean
 go vet ./...
 go test -bench .       # the numbers quoted in "Performance" above
+go test -bench Shard . # the numbers quoted in "Sharding"
+go test -run TestShardScalingTable -v   # prints the scaling table of "Sharding"
 ```
 
 The test suite fixes the observable contracts: every reader and writer against
@@ -512,6 +633,18 @@ process. It also pins the iterator contracts: `IterAll` and `AddSeq` run the
 caller's code under the lock, and `IterSnapshot` does not, so its body may
 mutate the set while seeing only the pre-call contents. `go test -race` is what
 pins the read paths.
+
+`sharded_syncset_test.go` covers the sharded wrapper with the same model
+comparison, the zero value through every writer and reader, the self-operation
+and inverted-order shapes under a budget, and the iterator contracts. Two of its
+tests pin things specific to the design: that `shardIndex` is a pure function of
+the value with two identical sets agreeing shard by shard (which is the
+invariant every multi-set operation rests on), and that the algebra still holds
+when the sets are large enough to populate every shard. Every assertion also
+checks that each shard's counter equals its map, so a mutation path that forgets
+to maintain it fails immediately rather than turning `Len` into a lie. The size
+of `shard`, which is what keeps two shards off one cache line, is pinned in
+`theoretical_slots_test.go`, the only file allowed to import `unsafe`.
 
 `theoretical_slots_test.go` ties the reservation model to the runtime it models:
 it reads the real slot count out of a freshly made map (through the runtime's
