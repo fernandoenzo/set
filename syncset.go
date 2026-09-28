@@ -8,25 +8,19 @@ import (
 	"sync/atomic"
 )
 
-// SyncSet is a Set that is safe for concurrent use: readers share the internal
-// lock, and writers exclude readers and each other. The plain Set stays
-// lock-free for callers that never share it.
+// SyncSet is a Set with an internal RWMutex: readers share it, writers exclude
+// readers and each other. The plain Set stays lock-free for callers that never
+// share it.
 //
-// An operation over several sets locks all its operands at once, always in the
-// same global order (the order of the sets' identities, assigned in
-// construction order), so the order the caller passes them in is irrelevant
-// and aliasing is safe: s.Extend(s), s.Retain(s), s.Subtract(s),
-// s.Extend(x, x), s.Difference(s), and two goroutines running a.Extend(b) and
-// b.Extend(a) at the same time are all well defined. A set is never locked
-// twice by one call, so a pending writer cannot wedge a second request either.
+// Operations over several sets take their locks in ascending identity order, so
+// the argument order is irrelevant and aliasing is safe: s.Extend(s),
+// s.Extend(x, x), s.Difference(s) and a.Extend(b) racing b.Extend(a) all work.
 //
-// Two methods run the caller's code under the lock, exactly like
-// sync.Map.Range: the body of an IterAll loop and the sequence passed to
-// AddSeq. Neither may call a method of any SyncSet; use GetAll (a snapshot to
-// iterate freely) or AddAll (values already in hand) instead.
+// IterAll and AddSeq run the caller's code under the lock, like sync.Map.Range;
+// that code must not call a SyncSet method. Use IterSnapshot or GetAll.
 //
-// The zero value (var s SyncSet[T]) is a usable empty set. A nil *SyncSet is
-// not usable, and a SyncSet must not be copied after first use.
+// The zero value is a usable empty set. A nil *SyncSet is not usable, and a
+// SyncSet must not be copied after first use.
 type SyncSet[T comparable] struct {
 	set    Set[T]
 	locker sync.RWMutex
@@ -34,12 +28,12 @@ type SyncSet[T comparable] struct {
 	id     uint64
 }
 
-// lastID numbers SyncSets in construction order. The order of the identities
-// is the global lock order that keeps multi-set operations deadlock-free.
+// lastID numbers SyncSets in construction order: the order of the identities
+// is the global lock order.
 var lastID atomic.Uint64
 
-// setID returns the set's identity, assigning it on first use so that every
-// route into existence, the zero value included, takes part in the lock order.
+// setID returns the set's identity, assigning it on first use so that the zero
+// value also takes part in the lock order.
 func (s *SyncSet[T]) setID() uint64 {
 	s.idOnce.Do(func() { s.id = lastID.Add(1) })
 	return s.id
@@ -47,45 +41,40 @@ func (s *SyncSet[T]) setID() uint64 {
 
 // lockReq is one lock a call needs: the set and whether it is a write lock.
 type lockReq[T comparable] struct {
-	s *SyncSet[T]
-	w bool
+	set   *SyncSet[T]
+	write bool
 }
 
 // lockAll acquires every request in ascending identity order, collapsing
-// repeats so that each set is locked once with a write request winning over a
-// read one, and returns the requests in acquisition order for unlockAll.
-//
-// The ascending order is what makes multi-set operations deadlock-free: a
-// goroutine holding locks can only wait for a lock whose identity is higher
-// than every identity it already holds, so no wait cycle can close. Collapsing
-// repeats is what makes aliasing safe: s.Difference(s) asks for s's read lock
-// twice and takes it once, so a pending writer cannot wedge the second request.
+// repeats into one lock (a write request winning over a read one), and returns
+// them in acquisition order for unlockAll. The order is what rules out wait
+// cycles; the collapse is what makes s.Difference(s) safe.
 //
 // It takes ownership of reqs.
 func lockAll[T comparable](reqs []lockReq[T]) []lockReq[T] {
 	for i := range reqs {
-		reqs[i].s.setID()
+		reqs[i].set.setID()
 	}
-	slices.SortFunc(reqs, func(a, b lockReq[T]) int { return cmp.Compare(a.s.id, b.s.id) })
+	slices.SortFunc(reqs, func(a, b lockReq[T]) int { return cmp.Compare(a.set.id, b.set.id) })
 
 	kept := 0
-	for _, r := range reqs {
-		if kept > 0 && reqs[kept-1].s == r.s {
-			if r.w {
-				reqs[kept-1].w = true
+	for _, req := range reqs {
+		if kept > 0 && reqs[kept-1].set.id == req.set.id {
+			if req.write {
+				reqs[kept-1].write = true
 			}
 			continue
 		}
-		reqs[kept] = r
+		reqs[kept] = req
 		kept++
 	}
 	reqs = reqs[:kept]
 
-	for _, r := range reqs {
-		if r.w {
-			r.s.locker.Lock()
+	for _, req := range reqs {
+		if req.write {
+			req.set.locker.Lock()
 		} else {
-			r.s.locker.RLock()
+			req.set.locker.RLock()
 		}
 	}
 	return reqs
@@ -93,11 +82,11 @@ func lockAll[T comparable](reqs []lockReq[T]) []lockReq[T] {
 
 // unlockAll releases the locks taken by lockAll, in reverse order.
 func unlockAll[T comparable](reqs []lockReq[T]) {
-	for i := len(reqs) - 1; i >= 0; i-- {
-		if reqs[i].w {
-			reqs[i].s.locker.Unlock()
+	for i := range slices.Backward(reqs) {
+		if reqs[i].write {
+			reqs[i].set.locker.Unlock()
 		} else {
-			reqs[i].s.locker.RUnlock()
+			reqs[i].set.locker.RUnlock()
 		}
 	}
 }
@@ -109,30 +98,29 @@ type pairReqs[T comparable] struct {
 	n    int
 }
 
-// lockPair is lockAll specialised to a receiver and one operand, in identity
-// order and collapsing into a single lock when both are the same set. The
-// binary predicates are documented as allocation-free, so they take their two
-// requests in a value instead of a slice.
+// lockPair is lockAll specialised to two sets, collapsing them into one lock
+// when they are the same. It returns a value, not a slice, so the binary
+// predicates stay allocation-free.
 func lockPair[T comparable](a *SyncSet[T], aw bool, b *SyncSet[T], bw bool) pairReqs[T] {
 	a.setID()
 	b.setID()
 	var out pairReqs[T]
 	if a == b {
 		out.n = 1
-		out.reqs[0] = lockReq[T]{s: a, w: aw || bw}
+		out.reqs[0] = lockReq[T]{set: a, write: aw || bw}
 	} else {
 		out.n = 2
-		out.reqs[0] = lockReq[T]{s: a, w: aw}
-		out.reqs[1] = lockReq[T]{s: b, w: bw}
+		out.reqs[0] = lockReq[T]{set: a, write: aw}
+		out.reqs[1] = lockReq[T]{set: b, write: bw}
 		if a.id > b.id {
 			out.reqs[0], out.reqs[1] = out.reqs[1], out.reqs[0]
 		}
 	}
 	for i := range out.n {
-		if out.reqs[i].w {
-			out.reqs[i].s.locker.Lock()
+		if out.reqs[i].write {
+			out.reqs[i].set.locker.Lock()
 		} else {
-			out.reqs[i].s.locker.RLock()
+			out.reqs[i].set.locker.RLock()
 		}
 	}
 	return out
@@ -141,27 +129,27 @@ func lockPair[T comparable](a *SyncSet[T], aw bool, b *SyncSet[T], bw bool) pair
 // unlockPair releases the locks taken by lockPair, in reverse order.
 func unlockPair[T comparable](reqs pairReqs[T]) {
 	for i := reqs.n - 1; i >= 0; i-- {
-		if reqs.reqs[i].w {
-			reqs.reqs[i].s.locker.Unlock()
+		if reqs.reqs[i].write {
+			reqs.reqs[i].set.locker.Unlock()
 		} else {
-			reqs.reqs[i].s.locker.RUnlock()
+			reqs.reqs[i].set.locker.RUnlock()
 		}
 	}
 }
 
 // lockWith acquires s (write when write) plus every set in others (read-only),
-// all in the global lock order, and returns the acquisition for unlockAll.
+// in the global lock order, and returns the acquisition for unlockAll.
 func (s *SyncSet[T]) lockWith(write bool, others ...*SyncSet[T]) []lockReq[T] {
 	reqs := make([]lockReq[T], 0, len(others)+1)
-	reqs = append(reqs, lockReq[T]{s: s, w: write})
+	reqs = append(reqs, lockReq[T]{set: s, write: write})
 	for _, other := range others {
-		reqs = append(reqs, lockReq[T]{s: other})
+		reqs = append(reqs, lockReq[T]{set: other})
 	}
 	return lockAll(reqs)
 }
 
-// innersOf returns the inner sets of the given wrappers, to hand to the
-// unsynchronised Set API. The caller must hold every one of their locks.
+// innersOf returns the inner sets, to hand to the unsynchronised Set API. The
+// caller must hold every one of their locks.
 func innersOf[T comparable](sets []*SyncSet[T]) []*Set[T] {
 	out := make([]*Set[T], len(sets))
 	for i, other := range sets {
@@ -331,6 +319,17 @@ func (s *SyncSet[T]) IterAll() iter.Seq[T] {
 	}
 }
 
+// IterSnapshot returns the elements as an iterator over a private clone, so the
+// loop body runs without the lock and may call methods of s, mutations
+// included. The loop sees the set as it was when IterSnapshot was called, and
+// the clone is paid on the call. Use IterAll when the body only reads.
+func (s *SyncSet[T]) IterSnapshot() iter.Seq[T] {
+	s.locker.RLock()
+	defer s.locker.RUnlock()
+	cloned := s.set.Clone()
+	return cloned.IterAll()
+}
+
 // IsSubset reports whether every element of s is an element of other.
 func (s *SyncSet[T]) IsSubset(other *SyncSet[T]) bool {
 	locks := lockPair(s, false, other, false)
@@ -363,7 +362,7 @@ func SyncUnion[T comparable](sets ...*SyncSet[T]) *SyncSet[T] {
 func SyncIntersection[T comparable](sets ...*SyncSet[T]) *SyncSet[T] {
 	reqs := make([]lockReq[T], 0, len(sets))
 	for _, other := range sets {
-		reqs = append(reqs, lockReq[T]{s: other})
+		reqs = append(reqs, lockReq[T]{set: other})
 	}
 	locks := lockAll(reqs)
 	defer unlockAll(locks)

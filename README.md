@@ -196,8 +196,20 @@ that identity order, collapsing repeated ones into a single lock:
 
 The two methods that run caller code — the body of an `IterAll` loop and the
 sequence passed to `AddSeq` — hold the lock for their duration, exactly like
-`sync.Map.Range`. Neither may call a method of any `SyncSet`. To iterate and
-mutate, take the snapshot: `for _, v := range s.GetAll() { s.Add(v * 2) }`.
+`sync.Map.Range`, and neither may call a method of any `SyncSet`. To iterate
+and mutate, use `IterSnapshot`, which clones the set under the read lock and
+hands back an iterator with no lock held:
+
+```go
+for v := range s.IterSnapshot() {
+	s.Add(v * 2) // safe: the loop walks a private copy
+}
+```
+
+The clone is the price: it costs a copy of the whole set on every call, and the
+loop sees the set as it was when `IterSnapshot` was called. `GetAll`
+materialises the same snapshot as a slice; `IterAll` is the one to use when the
+body only reads, because it copies nothing.
 
 A sequence of calls is not atomic; `Contains` followed by `Add` is still a
 read-then-write race, and that is what it is because the critical section would
@@ -238,6 +250,7 @@ returning `*SyncSet` from `Copy`, `Clone` and `Difference`.
 | `Contains(v T) bool` | Membership test. |
 | `GetAll() []T` | Elements as a new slice. |
 | `IterAll() iter.Seq[T]` | Elements as an iterator (range-over-func). |
+| `IterSnapshot() iter.Seq[T]` | Elements as an iterator over a private clone, so the loop body runs without any lock and may mutate the set. |
 | `IsSubset(other *Set[T]) bool` | Every element of `s` is in `other`. |
 | `Disjoint(other *Set[T]) bool` | No shared element. |
 | `Equal(other *Set[T]) bool` | Same elements. |
@@ -311,6 +324,7 @@ indicative; benchmark on your own workload.
 | `SyncSet.Contains` | one `RLock` plus one map lookup, no allocation (10.4 ns single-threaded, 40 ns across 32 goroutines) |
 | `SyncSet.IsSubset` / `Disjoint` / `Equal` | no allocation: the two lock requests travel in a value, so the lock order does not allocate |
 | `SyncSet.Extend` / `Retain` / `Subtract` with one argument | no allocation beyond the operand's own work: the single-argument path takes the pair route |
+| `SyncSet.IterSnapshot` | one clone, then a lock-free loop; it clones because `Clone` memmoves the groups instead of reinserting every element, which `Copy` would do |
 
 Hot loops range directly over the internal map rather than going through
 iterators, and results are pre-sized, so the common paths do not allocate beyond
@@ -494,7 +508,10 @@ executable), identity uniqueness and stability, and a concurrency section that
 runs the shapes which used to deadlock — self-operations, same operand twice,
 inverted argument orders, and a mixed workload over a pool of sets — under a
 budget so a regression fails as a hang with a name instead of as a stalled
-process. `go test -race` is what pins the read paths.
+process. It also pins the iterator contracts: `IterAll` and `AddSeq` run the
+caller's code under the lock, and `IterSnapshot` does not, so its body may
+mutate the set while seeing only the pre-call contents. `go test -race` is what
+pins the read paths.
 
 `theoretical_slots_test.go` ties the reservation model to the runtime it models:
 it reads the real slot count out of a freshly made map (through the runtime's

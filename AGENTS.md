@@ -68,7 +68,8 @@ Go modules, no Makefile and no CI configuration. `go test ./...` runs the whole 
 - **Constants over literals**: `overlapSample` (256) is named and derived in the README; never inline the sample size.
 - **Self-operations must stay valid**: `s.Extend(s)`, `s.Retain(s)`, `s.Subtract(s)` and zero-valued arguments are in scope, and `resize` replaces the receiver wholesale (`*s = *rebuilt`) — which is why `Set` carries no lock (it would be copied by that assignment) and why `SyncSet` holds its `Set` by value and never re-enters a lock it holds. `lockAll` collapses repeats, so `s.Extend(s)` locks `s` once.
 - **No background work**: no goroutines, no finalizers, no `unsafe`. Keep it that way. `SyncSet` gets its lock order from a counter (`lastID`/`setID`), not from pointer addresses, precisely to avoid `unsafe` and to stay reproducible.
-- **Lock order is the deadlock proof**: every `SyncSet` has an identity assigned in construction order, and `lockAll` sorts requests by it and collapses repeats. Never take a `SyncSet` lock outside `lockAll`; never call a public `SyncSet` method while holding one (it would re-enter). Iterate through `GetAll`, not `IterAll`, when the body touches a set.
+- **Lock order is the deadlock proof**: every `SyncSet` has an identity assigned in construction order, and `lockAll` sorts requests by it and collapses repeats. Never take a `SyncSet` lock outside `lockAll`; never call a public `SyncSet` method while holding one (it would re-enter). When the loop body touches a set, use `IterSnapshot`, never `IterAll`.
+- **A transient copy takes `Clone`, not `Copy`**: `Clone` memmoves the runtime's groups without rehashing, `Copy` reinserts every element (`~2-4×` slower, widening with the count — see `BenchmarkCloneVsCopy`).
 - **Iteration is unordered**: never let a public result depend on map iteration order (`GetAll` documents it, `Union`/`Intersection` build from ranges).
 - **Table-driven tests with a reference model**: `TestSetAlgebraMatchesModel` checks every ordered pair of subsets of `{0,1,2}` against `map[int]struct{}`; `TestMutatorsMatchModel` runs 200 seeded random trials against the same model. `syncset_test.go` mirrors both (`TestSyncSetAlgebraMatchesModel`, `TestSyncMutatorsMatchModel`) plus the zero-value, self-operation and concurrency contracts. New behaviour goes into that model comparison, not into ad-hoc assertions.
 - **Concurrency tests have a budget**: `mustFinish` fails a concurrency test that does not return within its budget, so a regression names the shape that deadlocked instead of stalling the package until the go test timeout. Do not compare values measured by two separate lock acquisitions (`s.Len()` against `s.GetAll()`): a writer may commit between them, and that is the documented contract, not a bug.
@@ -81,10 +82,11 @@ Go modules, no Makefile and no CI configuration. `go test ./...` runs the whole 
 |---|---|
 | `set.go` | The entire package: `Set[T]`, `New`, `NewFromSlices`, every method, `Union`, `Intersection`, `sampleCount`, `theoreticalSlots`, `needsRehash`, `needsFreshMap`, `hintOversized` |
 | `set_test.go` | The behavioural suite: 34 tests, exhaustive algebra against a model |
-| `syncset.go` | `SyncSet[T]`: the concurrent wrapper — `lockAll`/`unlockAll`, `setID`, and one method per `Set` method |
-| `syncset_test.go` | The wrapper's suite: the same model comparisons, the zero-value and self-operation contracts, and the deadlock shapes under a budget |
+| `syncset.go` | `SyncSet[T]`: the concurrent wrapper — `lockAll`/`unlockAll`, `lockPair`/`unlockPair`, `setID`, `IterSnapshot`, and one method per `Set` method |
+| `syncset_test.go` | The wrapper's suite: the same model comparisons, the zero-value and self-operation contracts, the iterator contracts, and the deadlock shapes under a budget |
 | `theoretical_slots_test.go` | Reads the runtime's real slot count (behind `unsafe`) and checks `theoreticalSlots` against it; the only tie between the model and the runtime |
 | `bench_test.go` | The benchmarks behind the README's Performance table (`go test -bench .`) |
+| `bench_sync_test.go` | The wrapper's benchmarks, plus `BenchmarkCloneVsCopy` behind the `IterSnapshot` row (run with `go test -bench Sync`) |
 | `LICENSE` | GPLv3 full text (byte-identical to `nvfp/LICENSE`) |
 | `go.mod` | Module path and Go version (`go 1.27.1`); no dependencies, so no `go.sum` |
 | `README.md` | User-facing contract: guarantees, API tables, cost model, concurrency rationale, and the derivation of the 256-element sample (Cochran's formula) |

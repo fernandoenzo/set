@@ -124,3 +124,46 @@ func BenchmarkGuardedContainsParallel(b *testing.B) {
 		}
 	})
 }
+
+// IterSnapshot clones the set before returning the iterator, and Clone is what
+// makes that cheap: it memmoves the groups without rehashing anything, where
+// Copy would reinsert every element. The two rows are the justification for
+// the choice in the doc comment; the gap widens with the element count.
+func BenchmarkCloneVsCopy(b *testing.B) {
+	for _, n := range []int{1_000, 100_000} {
+		s := New[int](0)
+		for i := range n {
+			s.Add(i)
+		}
+		b.Run("Clone", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = s.Clone()
+			}
+		})
+		b.Run("Copy", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = s.Copy()
+			}
+		})
+	}
+}
+
+func BenchmarkSyncIterSnapshot(b *testing.B) {
+	s := NewSyncFromSlices(benchSeq(benchSet))
+	b.ReportAllocs()
+	for b.Loop() {
+		for range s.IterSnapshot() {
+		}
+	}
+}
+
+func BenchmarkSyncIterAll(b *testing.B) {
+	s := NewSyncFromSlices(benchSeq(benchSet))
+	b.ReportAllocs()
+	for b.Loop() {
+		for range s.IterAll() {
+		}
+	}
+}

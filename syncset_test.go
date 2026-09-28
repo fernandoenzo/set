@@ -612,6 +612,104 @@ func TestSyncIterAllEarlyStopReleasesLock(t *testing.T) {
 	}
 }
 
+// IterSnapshot clones under the read lock and returns the iterator with no
+// lock held, so the body may touch the same set: it must not deadlock, must
+// see the pre-call contents, and must not be affected by writes made inside
+// the loop.
+func TestSyncIterSnapshotAllowsMutation(t *testing.T) {
+	s := syncSetOf(1, 2, 3)
+	seen := map[int]struct{}{}
+	mustFinish(t, "IterSnapshot body mutating the same set", 5*time.Second, func() {
+		for v := range s.IterSnapshot() {
+			seen[v] = struct{}{}
+			s.Add(v + 10)
+			s.Remove(v)
+		}
+	})
+	// The snapshot reflects the set as it was when IterSnapshot ran: each
+	// original element was visited exactly once, including those removed.
+	for _, v := range []int{1, 2, 3} {
+		if _, ok := seen[v]; !ok {
+			t.Fatalf("IterSnapshot skipped %d: %v", v, seen)
+		}
+	}
+	if len(seen) != 3 {
+		t.Fatalf("IterSnapshot yielded %d distinct elements, want 3: %v", len(seen), seen)
+	}
+	// The mutations landed: 1, 2, 3 removed, 11, 12, 13 added.
+	assertSyncMatches(t, s, modelOf(11, 12, 13))
+}
+
+// A writer running while IterSnapshot iterates must neither deadlock nor race.
+func TestSyncIterSnapshotWithConcurrentWriter(t *testing.T) {
+	s := NewSyncFromSlices(makeSeq(64))
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				s.Add(1000 + i%16)
+				s.Remove(1000 + i%16)
+			}
+		}
+	}()
+	mustFinish(t, "IterSnapshot under a concurrent writer", 30*time.Second, func() {
+		for range 2_000 {
+			n := 0
+			for range s.IterSnapshot() {
+				n++
+			}
+			if n < 64 {
+				t.Errorf("snapshot yielded %d elements, want at least the 64 originals", n)
+				return
+			}
+		}
+	})
+	close(stop)
+	wg.Wait()
+}
+
+// An early stop must not leak the clone's iterator state, and an unconsumed
+// iterator is still a valid call.
+func TestSyncIterSnapshotEdgeCases(t *testing.T) {
+	s := syncSetOf(1, 2, 3)
+	mustFinish(t, "early stop", 5*time.Second, func() {
+		for range s.IterSnapshot() {
+			break
+		}
+	})
+	mustFinish(t, "iterator never consumed", 5*time.Second, func() {
+		_ = s.IterSnapshot()
+	})
+	mustFinish(t, "Add after an unconsumed iterator", 5*time.Second, func() { s.Add(4) })
+
+	empty := NewSync[int](0)
+	if n := len(slices.Collect(empty.IterSnapshot())); n != 0 {
+		t.Fatalf("IterSnapshot on an empty set yielded %d elements", n)
+	}
+	var zero SyncSet[int]
+	if n := len(slices.Collect(zero.IterSnapshot())); n != 0 {
+		t.Fatalf("IterSnapshot on the zero value yielded %d elements", n)
+	}
+}
+
+// IterAll and IterSnapshot must agree on the elements of an untouched set.
+func TestSyncIteratorsAgree(t *testing.T) {
+	s := NewSyncFromSlices(makeSeq(500))
+	viaAll := slices.Sorted(s.IterAll())
+	viaSnapshot := slices.Sorted(s.IterSnapshot())
+	viaGetAll := slices.Sorted(slices.Values(s.GetAll()))
+	if !slices.Equal(viaAll, viaSnapshot) || !slices.Equal(viaAll, viaGetAll) {
+		t.Fatalf("iterators disagree: IterAll=%d IterSnapshot=%d GetAll=%d elements",
+			len(viaAll), len(viaSnapshot), len(viaGetAll))
+	}
+}
+
 // --- lockPair ---------------------------------------------------------------
 
 // lockPair is the binary operations' shared path: it must order by identity,
@@ -625,30 +723,30 @@ func TestSyncLockPairOrdersAndCollapses(t *testing.T) {
 	// Distinct sets: two requests in ascending identity order.
 	got := lockPair(a, false, b, false)
 	unlockPair(got)
-	if got.n != 2 || got.reqs[0].s != a || got.reqs[1].s != b {
+	if got.n != 2 || got.reqs[0].set != a || got.reqs[1].set != b {
 		t.Fatalf("lockPair(a, b) = %+v, want a then b", got)
 	}
 
 	// Passed the other way round, the order must not change.
 	got = lockPair(b, false, a, false)
 	unlockPair(got)
-	if got.n != 2 || got.reqs[0].s != a || got.reqs[1].s != b {
+	if got.n != 2 || got.reqs[0].set != a || got.reqs[1].set != b {
 		t.Fatalf("lockPair(b, a) = %+v, want a then b", got)
 	}
 
 	// Aliased: one lock, and a write request wins over a read one.
 	got = lockPair(a, true, a, false)
-	if got.n != 1 || got.reqs[0].s != a || !got.reqs[0].w {
+	if got.n != 1 || got.reqs[0].set != a || !got.reqs[0].write {
 		t.Fatalf("lockPair(a,true,a,false) = %+v, want a single write on a", got)
 	}
 	unlockPair(got)
 	got = lockPair(a, false, a, true)
-	if got.n != 1 || got.reqs[0].s != a || !got.reqs[0].w {
+	if got.n != 1 || got.reqs[0].set != a || !got.reqs[0].write {
 		t.Fatalf("lockPair(a,false,a,true) = %+v, want a single write on a", got)
 	}
 	unlockPair(got)
 	got = lockPair(a, false, a, false)
-	if got.n != 1 || got.reqs[0].s != a || got.reqs[0].w {
+	if got.n != 1 || got.reqs[0].set != a || got.reqs[0].write {
 		t.Fatalf("lockPair(a,false,a,false) = %+v, want a single read on a", got)
 	}
 	unlockPair(got)
@@ -684,9 +782,9 @@ func TestSyncLockOrderSortsAndCollapses(t *testing.T) {
 	// Identities are assigned in construction order, so the expected order is
 	// the slice order and the shuffle below must not survive.
 	reqs := []lockReq[int]{
-		{s: sets[5]}, {s: sets[0], w: true}, {s: sets[3]},
-		{s: sets[0]}, {s: sets[7], w: true}, {s: sets[3], w: true},
-		{s: sets[0]}, {s: sets[2]},
+		{set: sets[5]}, {set: sets[0], write: true}, {set: sets[3]},
+		{set: sets[0]}, {set: sets[7], write: true}, {set: sets[3], write: true},
+		{set: sets[0]}, {set: sets[2]},
 	}
 	got := lockAll(reqs)
 	defer unlockAll(got)
@@ -695,16 +793,16 @@ func TestSyncLockOrderSortsAndCollapses(t *testing.T) {
 		t.Fatalf("kept %d requests, want 5 (8 with repeats collapsed)", len(got))
 	}
 	for i := 1; i < len(got); i++ {
-		if got[i-1].s.id >= got[i].s.id {
-			t.Fatalf("requests not in ascending identity order: %d then %d", got[i-1].s.id, got[i].s.id)
+		if got[i-1].set.id >= got[i].set.id {
+			t.Fatalf("requests not in ascending identity order: %d then %d", got[i-1].set.id, got[i].set.id)
 		}
 	}
 	// A write request must win over read requests for the same set.
 	for _, r := range got {
-		if r.s == sets[0] && !r.w {
+		if r.set == sets[0] && !r.write {
 			t.Fatalf("set 0 kept as a read request, want the write request")
 		}
-		if r.s == sets[3] && !r.w {
+		if r.set == sets[3] && !r.write {
 			t.Fatalf("set 3 kept as a read request, want the write request")
 		}
 	}
